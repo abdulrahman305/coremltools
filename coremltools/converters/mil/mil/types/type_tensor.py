@@ -9,9 +9,15 @@ import sympy as sm
 from coremltools import _logger as logger
 
 from .get_type_info import get_type_info
-from .type_mapping import (builtin_to_string, is_subtype, is_tensor,
-                           nptype_from_builtin, numpy_type_to_builtin_type,
-                           promote_types)
+from .symbolic import is_symbolic
+from .type_mapping import (
+    builtin_to_string,
+    is_subtype,
+    is_tensor,
+    nptype_from_builtin,
+    numpy_type_to_builtin_type,
+    promote_types,
+)
 from .type_spec import Type
 
 
@@ -184,6 +190,8 @@ def is_tensor_and_is_compatible(tensor_type1, tensor_type2, allow_promotion=Fals
             most_specific_shape.append(shape1[i])
         elif shape1[i] == shape2[i]:
             most_specific_shape.append(shape1[i])
+        elif is_symbolic(shape1[i]) or is_symbolic(shape2[i]):
+            most_specific_shape.append(shape1[i] if is_symbolic(shape2[i]) else shape2[i])
         elif shape1[i] != shape2[i]:
             return False, None
 
@@ -193,6 +201,12 @@ def is_compatible_type(type1, type2):
     """
     Return if type1 and type2 are compatible.
     """
+    # For single-element tensor, it's compatible with scalar.
+    if is_tensor(type1) and len(type1.get_shape()) == 0:
+        type1 = type1.get_primitive()
+    if is_tensor(type2) and len(type2.get_shape()) == 0:
+        type2 = type2.get_primitive()
+
     if not is_subtype(type1, type2):
         is_comp, _ = is_tensor_and_is_compatible(type1, type2)
         return is_comp

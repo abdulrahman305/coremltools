@@ -1570,20 +1570,6 @@ class TestConv(TorchBaseTest):
         bias,
         groups=1,
     ):
-        if (
-            backend == ('neuralnetwork', 'fp32') and
-            padding == 1 and
-            stride == 2 and
-            height == 7 and
-            width == 5 and
-            in_channels == 3 and
-            out_channels == 3 and
-            kernel_size == 2 and
-            dilation == 3 and
-            not bias
-        ):
-            pytest.xfail("rdar://121954894: Conv2d starts to fail")
-
         if padding == "same" and stride != 1:
             return
         model = nn.Conv2d(
@@ -2894,10 +2880,11 @@ class TestAdaptiveAvgPool(TorchBaseTest):
 
 class TestMaxPool(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_shape, kernel_size, stride, padding, ceil_mode",
+        "compute_unit, backend, frontend, input_shape, kernel_size, stride, padding, ceil_mode",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [(1, 3, 15), (1, 1, 7)],
             [1, 3],
             [1, 2],
@@ -2909,6 +2896,7 @@ class TestMaxPool(TorchBaseTest):
         self,
         compute_unit,
         backend,
+        frontend,
         input_shape,
         kernel_size,
         stride,
@@ -2932,14 +2920,15 @@ class TestMaxPool(TorchBaseTest):
             ceil_mode=ceil_mode,
         )
         self.run_compare_torch(
-            input_shape, model, backend=backend, compute_unit=compute_unit
+            input_shape, model, frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_shape, kernel_size, stride, padding, ceil_mode",
+        "compute_unit, backend, frontend, input_shape, kernel_size, stride, padding, ceil_mode",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [(1, 3, 15, 15), (1, 1, 7, 7)],
             [1, 3],
             [1, 2],
@@ -2951,6 +2940,7 @@ class TestMaxPool(TorchBaseTest):
         self,
         compute_unit,
         backend,
+        frontend,
         input_shape,
         kernel_size,
         stride,
@@ -2975,14 +2965,15 @@ class TestMaxPool(TorchBaseTest):
             ceil_mode=ceil_mode,
         )
         self.run_compare_torch(
-            input_shape, model, backend=backend, compute_unit=compute_unit
+            input_shape, model, frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_shape, kernel_size, stride, padding, ceil_mode",
+        "compute_unit, backend, frontend, input_shape, kernel_size, stride, padding, ceil_mode",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [(1, 3, 11, 3, 11), (1, 1, 7, 4, 7)],
             [1, 3],
             [1, 2],
@@ -2994,12 +2985,16 @@ class TestMaxPool(TorchBaseTest):
         self,
         compute_unit,
         backend,
+        frontend,
         input_shape,
         kernel_size,
         stride,
         padding,
         ceil_mode,
     ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail("TODO (rdar://115846125): handle multi-output op max_pool3d_with_indices")
+
         if padding > kernel_size / 2:
             return
         if ceil_mode > 0 and padding == 0 and kernel_size == 1 and stride == 2:
@@ -3018,16 +3013,17 @@ class TestMaxPool(TorchBaseTest):
             ceil_mode=ceil_mode,
         )
         self.run_compare_torch(
-            input_shape, model, backend=backend, compute_unit=compute_unit
+            input_shape, model, frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
 
 class TestMaximumMinimum(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_shapes, mode",
+        "compute_unit, backend, frontend, input_shapes, mode",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 [(2, 5, 7, 3), (2, 5, 7, 3)],
                 [(3, 2, 9), (3, 2, 9)],
@@ -3038,7 +3034,7 @@ class TestMaximumMinimum(TorchBaseTest):
             ["minimum", "maximum"],
         ),
     )
-    def test_minimum_maximum(self, compute_unit, backend, input_shapes, mode):
+    def test_minimum_maximum(self, compute_unit, backend, frontend, input_shapes, mode):
         class TestModel(torch.nn.Module):
             def forward(self, x, y):
                 if mode == "minimum":
@@ -3049,14 +3045,15 @@ class TestMaximumMinimum(TorchBaseTest):
                     raise ValueError("Unsupported mode: {mode}".format(mode=mode))
 
         self.run_compare_torch(
-            input_shapes, TestModel(), backend=backend, compute_unit=compute_unit
+            input_shapes, TestModel(), frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_shapes, mode, xdtype, ydtype",
+        "compute_unit, backend, frontend, input_shapes, mode, xdtype, ydtype",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 [(2, 5, 7, 3), (2, 5, 7, 3)],
                 [(3, 2, 9), (3, 2, 9)],
@@ -3070,7 +3067,7 @@ class TestMaximumMinimum(TorchBaseTest):
         ),
     )
     def test_minimum_maximum_mixed_precision(
-        self, compute_unit, backend, input_shapes, mode, xdtype, ydtype
+        self, compute_unit, backend, frontend, input_shapes, mode, xdtype, ydtype
     ):
         class TestModel(torch.nn.Module):
             def forward(self, x, y):
@@ -3086,11 +3083,13 @@ class TestMaximumMinimum(TorchBaseTest):
         self.run_compare_torch(
             input_shapes,
             TestModel(),
+            frontend=frontend,
             compute_unit=compute_unit,
             backend=backend,
             rtol=1e-6 if xdtype == ydtype and xdtype == torch.float32 else 1e-3,
             atol=1e-6 if xdtype == ydtype and xdtype == torch.float32 else 1e-3,
         )
+
 
 class TestAMaxAMin(TorchBaseTest):
     @pytest.mark.parametrize(
@@ -5090,10 +5089,11 @@ class TestCumSum(TorchBaseTest):
 
 class TestReshape(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, output_shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, output_shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 (3, 2),
                 (2, -1),
@@ -5102,12 +5102,35 @@ class TestReshape(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_reshape(self, compute_unit, backend, output_shape, minimum_deployment_target):
+    def test_reshape(
+        self, compute_unit, backend, frontend, output_shape, minimum_deployment_target
+    ):
         input_shape = (2, 3)
         model = ModuleWrapper(function=torch.reshape, kwargs={"shape": output_shape})
         self.run_compare_torch(
             input_shape,
             model,
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, minimum_deployment_target",
+        itertools.product(
+            compute_units,
+            backends,
+            frontends,
+            [None, ct.target.iOS17],
+        ),
+    )
+    def test_reshape_scalar(self, compute_unit, backend, frontend, minimum_deployment_target):
+        model = ModuleWrapper(function=torch.reshape, kwargs={"shape": ()})
+        self.run_compare_torch(
+            (1,),
+            model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
@@ -5716,6 +5739,45 @@ class TestElementWiseUnary(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
+        "compute_unit, backend",
+        itertools.product(
+            compute_units,
+            backends,
+        ),
+    )
+    def test_clamp_min_int(self, compute_unit, backend):
+        params_dict = {"min": 0}
+        input_data = torch.randint(low=-5, high=5, size=(2, 3, 4))
+        model = ModuleWrapper(torch.clamp_min, params_dict)
+        self.run_compare_torch(
+            input_data,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            input_as_shape=False,
+            converter_input_type=[TensorType(shape=input_data.shape, dtype=np.int32)],
+        )
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend",
+        itertools.product(
+            compute_units,
+            backends,
+        ),
+    )
+    def test_clamp_min_float(self, compute_unit, backend):
+        params_dict = {"min": 0.0}
+        input_data = torch.randn((2, 3, 4))
+        model = ModuleWrapper(torch.clamp_min, params_dict)
+        self.run_compare_torch(
+            input_data,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            input_as_shape=False,
+        )
+
+    @pytest.mark.parametrize(
         "compute_unit, backend, shape, threshold, minimum_deployment_target",
         itertools.product(
             compute_units,
@@ -6249,16 +6311,12 @@ class TestTo(TorchBaseTest):
 
 class TestSlice(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, start, end, step",
+        "compute_unit, backend, frontend, start, end, step",
         itertools.product(
-            compute_units,
-            backends,
-            (0, -5, None),
-            (7, -1, 100, None),
-            (1, 2, None)
+            compute_units, backends, frontends, (0, -5, None), (7, -1, 100, None), (1, 2, None)
         ),
     )
-    def test_slice(self, compute_unit, backend, start, end, step):
+    def test_slice(self, compute_unit, backend, frontend, start, end, step):
         class SliceModel(torch.nn.Module):
             def forward(self, x):
                 y = x[start : end : step]
@@ -6268,18 +6326,25 @@ class TestSlice(TorchBaseTest):
         model.eval()
 
         self.run_compare_torch(
-            (9,), model, backend=backend, compute_unit=compute_unit
+            (9,), model, frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
     @pytest.mark.skipif(_python_version() < (3, 6), reason="requires python 3.6")
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, frontend",
         itertools.product(
             compute_units,
             backends,
+            frontends,
         ),
     )
-    def test_dynamic_slice(self, compute_unit, backend):
+    def test_dynamic_slice(self, compute_unit, backend, frontend):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2189: "
+                "torch.export Cannot Use Dynamic Index to Slice"
+            )
+
         class DynamicSlicer(torch.nn.Module):
             def forward(self, x, context_length):
                 return x[context_length:, :, :]
@@ -6311,7 +6376,12 @@ class TestSlice(TorchBaseTest):
             TensorType(name="context_length", shape=(1,), dtype=np.int32),
         ]
         self.run_compare_torch(
-            inputs, model, rand_range=(0, 8), backend=backend, compute_unit=compute_unit
+            inputs,
+            model,
+            rand_range=(0, 8),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
         )
 
 
@@ -6435,42 +6505,33 @@ class TestRepeat(TorchBaseTest):
 
 class TestRepeatInterleave(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank, repeat, dim",
+        "compute_unit, backend, rank, repeat",
         itertools.product(
             compute_units,
             backends,
             (1, 3, 5),
             (2, torch.tensor(3), torch.tensor([4])),
-            (None, 0),
         ),
     )
-    def test_scalar_repeat_and_dim_None_or_0(self, compute_unit, backend, rank, repeat, dim):
+    def test_scalar_repeat(self, compute_unit, backend, rank, repeat):
         input_shape = tuple(np.random.randint(low=1, high=6, size=rank))
-        model = ModuleWrapper(function=lambda x: x.repeat_interleave(repeat, dim=dim))
-        self.run_compare_torch(input_shape, model, backend=backend, compute_unit=compute_unit)
+        for dim in [None] + [*range(rank)]:
+            model = ModuleWrapper(function=lambda x: x.repeat_interleave(repeat, dim=dim))
+            self.run_compare_torch(input_shape, model, backend=backend, compute_unit=compute_unit)
 
     def test_single_fill_tensor_repeat(self):
-        input_shape = (2, 3)
-        model = ModuleWrapper(function=lambda x: x.repeat_interleave(torch.tensor([2, 2]), dim=0))
+        input_shape = (3, 2)
+        model = ModuleWrapper(function=lambda x: x.repeat_interleave(torch.tensor([2, 2]), dim=1))
         self.run_compare_torch(input_shape, model)
 
     def test_unsupported_tensor_repeat(self):
-        input_shape = (3, 1)
+        input_shape = (4, 1, 3)
         model = ModuleWrapper(
-            function=lambda x: x.repeat_interleave(torch.tensor([1, 2, 3]), dim=0)
+            function=lambda x: x.repeat_interleave(torch.tensor([1, 2, 3]), dim=2)
         )
         with pytest.raises(
             NotImplementedError,
             match=r"Conversion for torch.repeat_interleave with Tensor repeats has not been implemented",
-        ):
-            self.run_compare_torch(input_shape, model)
-
-    def test_unsupported_dim1(self):
-        input_shape = (2, 1, 2, 1, 2)
-        model = ModuleWrapper(function=lambda x: x.repeat_interleave(2, dim=1))
-        with pytest.raises(
-            NotImplementedError,
-            match=r"Conversion for torch.repeat_interleave with non-zero dim has not been implemented",
         ):
             self.run_compare_torch(input_shape, model)
 
@@ -6690,14 +6751,15 @@ class TestFill(TorchBaseTest):
 
 class TestCopy(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank",
+        "compute_unit, backend, frontend, rank",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [1, 3],
         ),
     )
-    def test_copy_(self, compute_unit, backend, rank):
+    def test_copy_(self, compute_unit, backend, frontend, rank):
         input_shape = np.random.randint(low=2, high=6, size=rank)
         input_shape = tuple(input_shape)
 
@@ -6708,17 +6770,24 @@ class TestCopy(TorchBaseTest):
                 return y
 
         model = CopyModel()
-        self.run_compare_torch(input_shape, model, backend=backend, compute_unit=compute_unit)
+        self.run_compare_torch(
+            input_shape,
+            model,
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+        )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank",
+        "compute_unit, backend, frontend, rank",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [1, 3],
         ),
     )
-    def test_copy__2(self, compute_unit, backend, rank):
+    def test_copy__2(self, compute_unit, backend, frontend, rank):
         input_shape = np.random.randint(low=2, high=6, size=rank)
         input_shape = tuple(input_shape)
 
@@ -6729,7 +6798,13 @@ class TestCopy(TorchBaseTest):
                 return y + 1
 
         model = CopyModel()
-        self.run_compare_torch(input_shape, model, backend=backend, compute_unit=compute_unit)
+        self.run_compare_torch(
+            input_shape,
+            model,
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+        )
 
 
 class TestZeros(TorchBaseTest):
@@ -7229,10 +7304,10 @@ class TestLogicalXor(TorchBaseTest):
 
 class TestWhere(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, shape",
-        itertools.product(compute_units, backends, [(2, 6), (3, 4, 5)]),
+        "compute_unit, backend, frontend, shape",
+        itertools.product(compute_units, backends, frontends, [(2, 6), (3, 4, 5)]),
     )
-    def test_where_test1(self, compute_unit, backend, shape):
+    def test_where_test1(self, compute_unit, backend, frontend, shape):
         class WhereModel(nn.Module):
             def forward(self, x, y):
                 return torch.where(x > 0.5, x, y)
@@ -7240,14 +7315,14 @@ class TestWhere(TorchBaseTest):
         input_shape = [shape, shape]
         model = WhereModel()
         self.run_compare_torch(
-            input_shape, model, backend=backend, compute_unit=compute_unit
+            input_shape, model, frontend=frontend, backend=backend, compute_unit=compute_unit
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, shape",
-        itertools.product(compute_units, backends, [(2, 6), (3, 4, 5)]),
+        "compute_unit, backend, frontend, shape",
+        itertools.product(compute_units, backends, frontends, [(2, 6), (3, 4, 5)]),
     )
-    def test_where_test2(self, compute_unit, backend, shape):
+    def test_where_test2(self, compute_unit, backend, frontend, shape):
         class WhereModel(nn.Module):
             def forward(self, cond, x, y):
                 return torch.where(cond, x, y)
@@ -7259,6 +7334,7 @@ class TestWhere(TorchBaseTest):
         self.run_compare_torch(
             inputs,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             expected_results=expected_results,
@@ -7266,17 +7342,18 @@ class TestWhere(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, shapes",
+        "compute_unit, backend, frontend, shapes",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 [(1, 2), (1, 2), (1, 1)],
                 [(1, 2, 3), (1, 1, 1), (1, 1, 3)],
             ],
         ),
     )
-    def test_where_test3(self, compute_unit, backend, shapes):
+    def test_where_test3(self, compute_unit, backend, frontend, shapes):
         class WhereModel(nn.Module):
             def forward(self, cond, x, y):
                 return torch.where(cond, x, y)
@@ -7289,6 +7366,7 @@ class TestWhere(TorchBaseTest):
         self.run_compare_torch(
             inputs,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             expected_results=expected_results,
@@ -7296,10 +7374,11 @@ class TestWhere(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, shapes, xdtype, ydtype",
+        "compute_unit, backend, frontend, shapes, xdtype, ydtype",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 [(1, 2), (1, 2), (1, 1)],
                 [(1, 2, 3), (1, 2, 1), (1, 1, 3)],
@@ -7308,7 +7387,7 @@ class TestWhere(TorchBaseTest):
             (torch.float16, torch.float32),
         ),
     )
-    def test_where_mixed_precision(self, compute_unit, backend, shapes, xdtype, ydtype):
+    def test_where_mixed_precision(self, compute_unit, backend, frontend, shapes, xdtype, ydtype):
         class WhereModel(nn.Module):
             def forward(self, cond, x, y):
                 a = x.to(xdtype)
@@ -7323,6 +7402,7 @@ class TestWhere(TorchBaseTest):
             inputs,
             WhereModel(),
             compute_unit=compute_unit,
+            frontend=frontend,
             backend=backend,
             input_as_shape=False,
             rtol=1e-6 if xdtype == ydtype and xdtype == torch.float32 else 1e-3,
@@ -7330,10 +7410,16 @@ class TestWhere(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, shape",
-        itertools.product(compute_units, backends, COMMON_SHAPES + [(10,)]),
+        "compute_unit, backend, frontend, shape",
+        itertools.product(compute_units, backends, frontends, COMMON_SHAPES + [(10,)]),
     )
-    def test_where_single_param(self, compute_unit, backend, shape):
+    def test_where_single_param(self, compute_unit, backend, frontend, shape):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2183: "
+                "Operator torch._ops.aten._assert_async.msg is not Aten Canonical"
+            )
+
         class WhereModelSingleParam(nn.Module):
             def forward(self, x):
                 return torch.where(x)
@@ -7352,6 +7438,7 @@ class TestWhere(TorchBaseTest):
         self.run_compare_torch(
             x,
             WhereModelSingleParam(),
+            frontend=frontend,
             backend=backend,
             input_as_shape=False,
             compute_unit=compute_unit,
@@ -7360,10 +7447,11 @@ class TestWhere(TorchBaseTest):
 
 class TestSelect(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, dim_index",
+        "compute_unit, backend, frontend, dim_index",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [
                 [0, 0],
                 [1, 1],
@@ -7371,7 +7459,7 @@ class TestSelect(TorchBaseTest):
             ],
         ),
     )
-    def test_select(self, compute_unit, backend, dim_index):
+    def test_select(self, compute_unit, backend, frontend, dim_index):
         dim, index = dim_index
 
         class SelectModel(nn.Module):
@@ -7379,17 +7467,25 @@ class TestSelect(TorchBaseTest):
                 return x.select(dim, index)
 
         input_shape = (1, 2, 3)
-        model = SelectModel()
         self.run_compare_torch(
-            input_shape, model, backend=backend, compute_unit=compute_unit
+            input_shape,
+            SelectModel(),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
         )
 
-
     @pytest.mark.parametrize(
-        "compute_unit, backend",
-        itertools.product(compute_units, backends)
+        "compute_unit, backend, frontend",
+        itertools.product(compute_units, backends, frontends)
     )
-    def test_dynamic_index(self, compute_unit, backend):
+    def test_dynamic_index(self, compute_unit, backend, frontend):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2189: "
+                "torch.export Cannot Use Dynamic Index to Select"
+            )
+
         class M(torch.nn.Module):
             def forward(self, float_arr, int_arr):
                 dynamic_index = int_arr[1]
@@ -7408,8 +7504,29 @@ class TestSelect(TorchBaseTest):
             M(),
             input_as_shape=False,
             converter_input_type=inputs_types,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit
+        )
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend",
+        itertools.product(compute_units, backends, frontends),
+    )
+    def test_dynamic_index_with_explicit_slice_on_all_other_dims(self, compute_unit, backend, frontend):
+        class SelectModel(torch.nn.Module):
+            def forward(self, x, position):
+                y = x[:, :, position]
+                return y
+
+        self.run_compare_torch(
+            [(2, 3, 4), (1,)],
+            SelectModel(),
+            input_dtype=np.int32,
+            rand_range=(0, 2),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
         )
 
 
@@ -7572,13 +7689,14 @@ class TestTorchTensor(TorchBaseTest):
 
 class TestTensorAssign(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_case_1(self, compute_unit, backend):
+    def test_tensor_assign_scalar(self, compute_unit, backend, minimum_deployment_target):
         # single dimension assignment for a 1D tensor
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x):
@@ -7590,16 +7708,24 @@ class TestTensorAssign(TorchBaseTest):
 
         shape = (5,)
         model = TensorAssignModel()
-        self.run_compare_torch(shape, model, backend=backend, compute_unit=compute_unit)
+        self.run_compare_torch(
+            shape,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend",
-        itertools.product(
-            compute_units,
-            backends,
-        ),
+        "compute_unit, backend, minimum_deployment_target",
+        itertools.product(compute_units, backends, [None, ct.target.iOS18]),
     )
-    def test_tensor_assign_case_2(self, compute_unit, backend):
+    def test_tensor_assign_case_scalar_case_2(
+        self, compute_unit, backend, minimum_deployment_target
+    ):
+        """
+        A little bit more complicated scalar tensor assignment test.
+        """
         # single dimension assignment for two 1D tensors
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x, y):
@@ -7615,11 +7741,15 @@ class TestTensorAssign(TorchBaseTest):
         shape = (5,)
         model = TensorAssignModel()
         self.run_compare_torch(
-            [shape, shape], model, backend=backend, compute_unit=compute_unit
+            [shape, shape],
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, shape",
+        "compute_unit, backend, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
@@ -7627,10 +7757,18 @@ class TestTensorAssign(TorchBaseTest):
                 (5, 4),
                 (5, 4, 3),
             ],
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_case_3(self, compute_unit, backend, shape):
+    def test_tensor_assign_case_broadcast(
+        self, compute_unit, backend, shape, minimum_deployment_target
+    ):
         # broadcast assignment for two n-D tensors
+        if compute_unit != ct.ComputeUnit.CPU_ONLY:
+            pytest.xfail(
+                "rdar://128024502 ([Bug][iOS18] slice_update failing test on backends beside CPU_ONLY)"
+            )
+
         class TensorAssignModel(torch.nn.Module):
             def __init__(self):
                 super(TensorAssignModel, self).__init__()
@@ -7642,18 +7780,28 @@ class TestTensorAssign(TorchBaseTest):
                 return x
 
         model = TensorAssignModel()
-        self.run_compare_torch(
-            [shape, shape], model, backend=backend, compute_unit=compute_unit
+        res = self.run_compare_torch(
+            [shape, shape],
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
         )
 
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            [None, ct.target.iOS18],
         ),
     )
-    def test_itensor_assign_case_4(self, compute_unit, backend):
+    def test_tensor_assign_nd_tensor(self, compute_unit, backend, minimum_deployment_target):
         # single dimension assignment for two n-D tensors
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x, y):
@@ -7664,18 +7812,28 @@ class TestTensorAssign(TorchBaseTest):
 
         shape = (5, 4)
         model = TensorAssignModel()
-        self.run_compare_torch(
-            [shape, shape], model, backend=backend, compute_unit=compute_unit
+        res = self.run_compare_torch(
+            [shape, shape],
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
         )
 
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_case_5(self, compute_unit, backend):
+    def test_tensor_assign_slice(self, compute_unit, backend, minimum_deployment_target):
         # slice dimension assignment
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x):
@@ -7684,16 +7842,28 @@ class TestTensorAssign(TorchBaseTest):
 
         shape = (2, 10)
         model = TensorAssignModel()
-        self.run_compare_torch(shape, model, backend=backend, compute_unit=compute_unit)
+        res = self.run_compare_torch(
+            shape,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
 
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_case_6(self, compute_unit, backend):
+    def test_tensor_assign_slice_case_2(self, compute_unit, backend, minimum_deployment_target):
         # a more complicated slice dimension assignment
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x):
@@ -7702,17 +7872,31 @@ class TestTensorAssign(TorchBaseTest):
 
         shape = (2, 10, 3)
         model = TensorAssignModel()
-        self.run_compare_torch(shape, model, backend=backend, compute_unit=compute_unit)
+        res = self.run_compare_torch(
+            shape,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, dynamic",
+        "compute_unit, backend, dynamic, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
             [True, False],
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_case_7(self, compute_unit, backend, dynamic):
+    def test_tensor_assign_complex_slice(
+        self, compute_unit, backend, dynamic, minimum_deployment_target
+    ):
         # general case
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x):
@@ -7737,19 +7921,34 @@ class TestTensorAssign(TorchBaseTest):
             ]
         else:
             converter_input_type = None
-        self.run_compare_torch(
+        res = self.run_compare_torch(
             shape,
             model,
             converter_input_type=converter_input_type,
             backend=backend,
-            compute_unit=compute_unit
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
         )
 
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
     @pytest.mark.parametrize(
-        "compute_unit, backend, dynamic, mixed_rank",
-        itertools.product(compute_units, backends, [True, False], [True, False]),
+        "compute_unit, backend, dynamic, mixed_rank, minimum_deployment_target",
+        itertools.product(
+            compute_units, backends, [True, False], [True, False], [None, ct.target.iOS18]
+        ),
     )
-    def test_tensor_assign_case_8(self, compute_unit, backend, dynamic, mixed_rank):
+    def test_tensor_assign_dynamic_slice(
+        self, compute_unit, backend, dynamic, mixed_rank, minimum_deployment_target
+    ):
+        if compute_unit != ct.ComputeUnit.CPU_ONLY:
+            pytest.xfail(
+                "rdar://128024502 ([Bug][iOS18] slice_update failing test on backends beside CPU_ONLY)"
+            )
+
         # general case with dynamic begin and end
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x, begin_0, begin_1, end_1):
@@ -7802,7 +8001,8 @@ class TestTensorAssign(TorchBaseTest):
             input_as_shape=False,
             converter_input_type=converter_input_type,
             backend=backend,
-            compute_unit=compute_unit
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
         )
 
         if not mixed_rank:
@@ -7812,14 +8012,22 @@ class TestTensorAssign(TorchBaseTest):
             assert "squeeze" not in get_op_types_in_program(prog)
             assert "expand_dims" not in get_op_types_in_program(prog)
 
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
     @pytest.mark.parametrize(
-        "compute_unit, backend",
+        "compute_unit, backend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            [None, ct.target.iOS18],
         ),
     )
-    def test_tensor_assign_type_compatibility(self, compute_unit, backend):
+    def test_tensor_assign_type_compatibility(
+        self, compute_unit, backend, minimum_deployment_target
+    ):
         class TensorAssignModel(torch.nn.Module):
             def forward(self, x):
                 x[:, 1] = torch.tensor([1, 2], dtype=torch.int32)
@@ -7827,19 +8035,157 @@ class TestTensorAssign(TorchBaseTest):
 
         shape = (2, 3)
         model = TensorAssignModel()
-        self.run_compare_torch(shape, model, backend=backend, compute_unit=compute_unit)
+        res = self.run_compare_torch(
+            shape,
+            model,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
+
+class TestSelectScatter(TorchBaseTest):
+    @pytest.mark.parametrize(
+        "compute_unit, backend, minimum_deployment_target, input_shape",
+        itertools.product(
+            compute_units,
+            backends,
+            [None, ct.target.iOS18],
+            [(1,), (4,), (3, 4), (1, 2, 4)],
+        ),
+    )
+    def test_select_scatter(self, compute_unit, backend, minimum_deployment_target, input_shape):
+        rank = len(input_shape)
+
+        if (
+            input_shape == (1, 2, 4)
+            and minimum_deployment_target == ct.target.iOS18
+            and compute_unit != ct.ComputeUnit.CPU_ONLY
+        ):
+            pytest.xfail(
+                "rdar://128024502 ([Bug][iOS18] slice_update failing test on backends beside CPU_ONLY)"
+            )
+
+        def test_model(src_shape, dim, index):
+
+            class SelectScatterModel(torch.nn.Module):
+                def forward(self, x, y):
+                    return torch.select_scatter(
+                        input=x,
+                        src=y,
+                        dim=dim,
+                        index=index,
+                    )
+
+            class Rank0SelectScatterModel(torch.nn.Module):
+                def forward(self, x, y):
+                    y = y[0]
+                    return torch.select_scatter(
+                        input=x,
+                        src=y,
+                        dim=dim,
+                        index=index,
+                    )
+
+            if len(src_shape) == 0:
+                src_shape = [1]
+                model = Rank0SelectScatterModel()
+            else:
+                model = SelectScatterModel()
+
+            res = self.run_compare_torch(
+                [input_shape, src_shape],
+                model,
+                backend=backend,
+                compute_unit=compute_unit,
+                minimum_deployment_target=minimum_deployment_target,
+            )
+
+            # check slice_update is used
+            if minimum_deployment_target == ct.target.iOS18:
+                prog = res[1]._mil_program
+                assert "slice_update" in get_op_types_in_program(prog)
+
+        for dim in range(-rank, rank):
+            for index in range(-input_shape[dim], input_shape[dim]):
+                dim_val = dim + rank if dim < 0 else dim
+                src_shape = list(input_shape)
+                src_shape = src_shape[:dim_val] + src_shape[dim_val + 1 :]
+                test_model(src_shape, dim, index)
+
+
+class TestSliceScatter(TorchBaseTest):
+    @pytest.mark.parametrize(
+        "compute_unit, backend, minimum_deployment_target, input_shape",
+        itertools.product(
+            compute_units,
+            backends,
+            [None, ct.target.iOS18],
+            [(1,), (4,), (3, 4), (1, 2, 4)],
+        ),
+    )
+    def test_slice_scatter(self, compute_unit, backend, minimum_deployment_target, input_shape):
+        rank = len(input_shape)
+
+        def test_model(src_shape, dim, start, end, step):
+            class SliceScatterModel(torch.nn.Module):
+                def forward(self, x, y):
+                    return torch.slice_scatter(
+                        input=x,
+                        src=y,
+                        dim=dim,
+                        start=start,
+                        end=end,
+                        step=step,
+                    )
+
+            res = self.run_compare_torch(
+                [input_shape, src_shape],
+                SliceScatterModel(),
+                backend=backend,
+                compute_unit=compute_unit,
+                minimum_deployment_target=minimum_deployment_target,
+            )
+
+            # check slice_update is used
+            if minimum_deployment_target == ct.target.iOS18:
+                prog = res[1]._mil_program
+                assert "slice_update" in get_op_types_in_program(prog)
+
+        for dim in range(-rank, rank):
+            for start in list(range(0, input_shape[dim])) + [None]:
+                start_val = start if start is not None else 0
+                for end in list(range(start_val + 1, input_shape[dim] + 1)) + [None]:
+                    end_val = end if end is not None else input_shape[dim]
+                    for step in range(1, end_val - start_val + 1):
+                        src_shape = list(input_shape)
+                        src_shape[dim] = 1 + (end_val - start_val - 1) // step
+                        src_shape = tuple(src_shape)
+                        test_model(src_shape, dim, start, end, step)
 
 
 class TestIndexPut(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, minimum_deployment_target",
+        "compute_unit, backend, frontend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_put_case_1(self, compute_unit, backend, minimum_deployment_target):
+    def test_index_put_bool_index_case_1(self, compute_unit, backend, frontend, minimum_deployment_target):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2183: "
+                "Operator torch._ops.aten._assert_async.msg is not Aten Canonical"
+            )
+
         class IndexPutModel(torch.nn.Module):
             def forward(self, x, y):
                 y = x + 1
@@ -7851,21 +8197,31 @@ class TestIndexPut(TorchBaseTest):
         self.run_compare_torch(
             [shape, shape],
             IndexPutModel(),
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank, minimum_deployment_target",
+        "compute_unit, backend, frontend, rank, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [0, 1],
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_put_case_2(self, compute_unit, backend, rank, minimum_deployment_target):
+    def test_index_put_bool_index_case_2(
+        self, compute_unit, backend, frontend, rank, minimum_deployment_target
+    ):
+        if backend[0] == "neuralnetwork" and frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2185: "
+                "EXIR IndexPut Fails on NeuralNetwork Backend"
+            )
+
         class IndexPutModel(torch.nn.Module):
             def forward(self, x):
                 mask = torch.tensor([True, False, False, False, True, True]).view(3, 2)
@@ -7875,20 +8231,30 @@ class TestIndexPut(TorchBaseTest):
                     x[mask] = torch.tensor([1.0])
                 return x
 
-        shape = (3, 2)
-        model = IndexPutModel()
-        self.run_compare_torch(shape, model, backend=backend, compute_unit=compute_unit,
-                               minimum_deployment_target=minimum_deployment_target)
+        self.run_compare_torch(
+            (3, 2),
+            IndexPutModel(),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target
+        )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, minimum_deployment_target",
+        "compute_unit, backend, frontend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_put_case_3(self, compute_unit, backend, minimum_deployment_target):
+    def test_index_put_dynamic_bool_index(self, compute_unit, backend, frontend, minimum_deployment_target):
+        if backend[0] == "neuralnetwork" and frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2185: "
+                "EXIR IndexPut Fails on NeuralNetwork Backend"
+            )
         if _macos_version() < (13, 0):
             pytest.skip("Issue fixed in iOS16/macOS13")
 
@@ -7902,10 +8268,10 @@ class TestIndexPut(TorchBaseTest):
             torch.Tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6]),
             torch.Tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         ]
-        model = IndexPutModel()
         self.run_compare_torch(
             inputs,
-            model,
+            IndexPutModel(),
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             input_as_shape=False,
@@ -7913,10 +8279,25 @@ class TestIndexPut(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank, accumulate, minimum_deployment_target",
-        itertools.product(compute_units, backends, [3], [True, False], [None, ct.target.iOS17]),
+        "compute_unit, backend, frontend, rank, accumulate, minimum_deployment_target",
+        itertools.product(
+            compute_units,
+            backends,
+            frontends,
+            [3],
+            [True, False],
+            [None, ct.target.iOS17],
+        ),
     )
-    def test_index_put_case_4(self, compute_unit, backend, rank, accumulate, minimum_deployment_target):
+    def test_index_put_int_index_case_1(
+        self, compute_unit, backend, frontend, rank, accumulate, minimum_deployment_target
+    ):
+        if backend[0] == "neuralnetwork" and frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2185: "
+                "EXIR IndexPut Fails on NeuralNetwork Backend"
+            )
+
         class IndexPutModel(torch.nn.Module):
             def forward(self, x, indices, values):
                 x.index_put_(tuple(indices.t()), values, accumulate=accumulate)
@@ -7945,6 +8326,7 @@ class TestIndexPut(TorchBaseTest):
         self.run_compare_torch(
             inputs,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             input_as_shape=False,
@@ -7952,12 +8334,151 @@ class TestIndexPut(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, accumulate, minimum_deployment_target",
-        itertools.product(compute_units, backends, [True, False], [None, ct.target.iOS17]),
+        "compute_unit, backend, frontend, minimum_deployment_target",
+        itertools.product(compute_units, backends, frontends, [None, ct.target.iOS18]),
+    )
+    def test_index_put_int_index_case_2(
+        self, compute_unit, backend, frontend, minimum_deployment_target
+    ):
+        class IndexPutModel(torch.nn.Module):
+            def forward(self, x):
+                box_corner = x.new(x.shape)
+                box_corner[:, :, 0] = x[:, :, 0]
+                box_corner[:, :, 1] = x[:, :, 1]
+                return box_corner[:, :, :2]
+
+        res = self.run_compare_torch(
+            (2, 3, 4),
+            IndexPutModel(),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, minimum_deployment_target",
+        itertools.product(compute_units, backends, frontends, [None, ct.target.iOS18]),
+    )
+    def test_index_put_int_index_case_3(
+        self, compute_unit, backend, frontend, minimum_deployment_target
+    ):
+        class IndexPutModel(torch.nn.Module):
+            def forward(self, x):
+                y = x.clone()
+                y[:, 0] = 1.0
+                return y
+
+        res = self.run_compare_torch(
+            (2, 3),
+            IndexPutModel(),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, val_shape, minimum_deployment_target",
+        itertools.product(
+            compute_units, backends, frontends, ((2, 1), (1,)), [None, ct.target.iOS18]
+        ),
+    )
+    def test_index_put_dynamic_int_index_case_1(
+        self, compute_unit, backend, frontend, val_shape, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.TORCHSCRIPT:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2188: "
+                "torch.jit.trace Inplace Index Put Silent Error"
+            )
+
+        class IndexPutModel(torch.nn.Module):
+            def forward(self, x, position, val):
+                y = x.clone()
+                y[:, position] = val
+                return y
+
+        res = self.run_compare_torch(
+            [(2, 3), (1,), val_shape],
+            IndexPutModel(),
+            input_dtype=np.int32,
+            rand_range=(0, 2),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, minimum_deployment_target",
+        itertools.product(compute_units, backends, frontends, [None, ct.target.iOS18]),
+    )
+    def test_index_put_dynamic_int_index_case_2(
+        self, compute_unit, backend, frontend, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.TORCHSCRIPT:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2188: "
+                "torch.jit.trace Inplace Index Put Silent Error"
+            )
+
+        class IndexPutModel(torch.nn.Module):
+            def forward(self, x, position, val):
+                y = x.clone()
+                y[position, 1:4] = val
+                return y
+
+        res = self.run_compare_torch(
+            [(2, 4), (1,), (1,)],
+            IndexPutModel(),
+            input_dtype=np.int32,
+            rand_range=(0, 2),
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # check slice_update is used
+        if minimum_deployment_target == ct.target.iOS18:
+            prog = res[1]._mil_program
+            assert "slice_update" in get_op_types_in_program(prog)
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, accumulate, minimum_deployment_target",
+        itertools.product(
+            compute_units,
+            backends,
+            frontends,
+            [True, False],
+            [None, ct.target.iOS17],
+        ),
     )
     def test_index_put_negative_indices_case_1(
-        self, compute_unit, backend, accumulate, minimum_deployment_target
+        self, compute_unit, backend, frontend, accumulate, minimum_deployment_target
     ):
+        if backend[0] == "neuralnetwork" and frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2185: "
+                "EXIR IndexPut Fails on NeuralNetwork Backend"
+            )
+
         class IndexPutModel(torch.nn.Module):
             def forward(self, x):
                 x.index_put_(
@@ -7970,20 +8491,32 @@ class TestIndexPut(TorchBaseTest):
         self.run_compare_torch(
             (3, 4),
             IndexPutModel(),
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank, accumulate, minimum_deployment_target",
+        "compute_unit, backend, frontend, rank, accumulate, minimum_deployment_target",
         itertools.product(
-            compute_units, backends, [1, 2, 3], [True, False], [None, ct.target.iOS17]
+            compute_units,
+            backends,
+            frontends,
+            [1, 2, 3],
+            [True, False],
+            [None, ct.target.iOS17],
         ),
     )
     def test_index_put_negative_indices_case_2(
-        self, compute_unit, backend, rank, accumulate, minimum_deployment_target
+        self, compute_unit, backend, frontend, rank, accumulate, minimum_deployment_target
     ):
+        if backend[0] == "neuralnetwork" and frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2185: "
+                "EXIR IndexPut Fails on NeuralNetwork Backend"
+            )
+
         class IndexPutModel(torch.nn.Module):
             def forward(self, x, indices, values):
                 x.index_put_(tuple(indices.t()), values, accumulate=accumulate)
@@ -8012,38 +8545,21 @@ class TestIndexPut(TorchBaseTest):
         self.run_compare_torch(
             inputs,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             input_as_shape=False,
             minimum_deployment_target=minimum_deployment_target,
         )
 
-    @pytest.mark.parametrize(
-        "compute_unit, backend",
-        itertools.product(compute_units, backends),
-    )
-    def test_index_put_case_5(self, compute_unit, backend):
-        class IndexPutModel(torch.nn.Module):
-            def forward(self, x):
-                box_corner = x.new(x.shape)
-                box_corner[:, :, 0] = x[:, :, 0]
-                box_corner[:, :, 1] = x[:, :, 1]
-                return box_corner[:, :, :2]
-
-        self.run_compare_torch(
-            (2, 3, 4),
-            IndexPutModel(),
-            backend=backend,
-            compute_unit=compute_unit,
-        )
-
 
 class TestIndex(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (10,),
@@ -8052,8 +8568,15 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_bool_indices(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
-        rank = len(shape)
+    def test_index_bool_indices(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2183: "
+                "Operator torch._ops.aten._assert_async.msg is not Aten Canonical"
+            )
+
         class IndexModel(torch.nn.Module):
             def __init__(self, axis):
                 super().__init__()
@@ -8071,6 +8594,7 @@ class TestIndex(TorchBaseTest):
                     assert self.axis == 3
                     return x[:, :, :, index]
 
+        rank = len(shape)
         for index_rank in range(1, rank + 1):
             for axis in range(rank + 1 - index_rank):
                 input_data = generate_input_data(shape, rand_range=(0, 2), dtype=input_dtype)
@@ -8084,6 +8608,7 @@ class TestIndex(TorchBaseTest):
                 self.run_compare_torch(
                     [input_data, ref_data],
                     model,
+                    frontend=frontend,
                     backend=backend,
                     compute_unit=compute_unit,
                     input_as_shape=False,
@@ -8091,10 +8616,11 @@ class TestIndex(TorchBaseTest):
                 )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2),
@@ -8103,7 +8629,15 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_1(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_1(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2184: "
+                "Cannot Convert Empty EXIR Model"
+            )
+
         # all elements are selected
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8116,6 +8650,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8124,10 +8659,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2),
@@ -8136,7 +8672,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_2(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_2(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Only one axis is sliced."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8151,6 +8689,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8159,10 +8698,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8171,7 +8711,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_3(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_3(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Only two axes are sliced, and connected."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8189,6 +8731,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8197,10 +8740,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8209,7 +8753,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_4(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_4(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Only two axes are sliced, and not connected."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8227,6 +8773,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8235,10 +8782,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8247,7 +8795,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_5(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_5(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """All axes are sliced."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8268,6 +8818,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8276,10 +8827,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2),
@@ -8288,7 +8840,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_6(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_6(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Only one axis is sliced + nd mode."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8305,6 +8859,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8313,10 +8868,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8325,7 +8881,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_7(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_7(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Two axes are sliced, and connected + nd mode."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8343,6 +8901,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8351,10 +8910,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8363,7 +8923,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_8(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_8(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Two axes are sliced, and not connected + nd mode."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8381,6 +8943,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8389,10 +8952,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8401,7 +8965,15 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_9(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_9(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2183: "
+                "Operator torch._ops.aten._assert_async.msg is not Aten Canonical"
+            )
+
         """One axis is sliced through bool mask."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8415,6 +8987,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8423,10 +8996,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8435,7 +9009,15 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_10(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_10(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2183: "
+                "Operator torch._ops.aten._assert_async.msg is not Aten Canonical"
+            )
+
         """Multiple axes are sliced through bool masks with possible broadcasting."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8464,6 +9046,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8472,10 +9055,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (3, 4),
@@ -8484,7 +9068,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_11(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_11(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Broadcastable indices."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8503,6 +9089,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             model,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8511,10 +9098,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8523,7 +9111,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_12(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_12(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Another broadcastable indices test case."""
         class IndexModel(torch.nn.Module):
             def forward(self, x):
@@ -8538,6 +9128,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             IndexModel(),
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -8546,10 +9137,11 @@ class TestIndex(TorchBaseTest):
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype, shape, minimum_deployment_target",
+        "compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             (np.float32, np.int32, np.bool_),
             [
                 (1, 2, 3),
@@ -8558,7 +9150,9 @@ class TestIndex(TorchBaseTest):
             [None, ct.target.iOS17],
         ),
     )
-    def test_index_int_index_case_13(self, compute_unit, backend, input_dtype, shape, minimum_deployment_target):
+    def test_index_int_index_case_13(
+        self, compute_unit, backend, frontend, input_dtype, shape, minimum_deployment_target
+    ):
         """Another broadcastable indices (negative) test case."""
 
         class IndexModel(torch.nn.Module):
@@ -8570,6 +9164,7 @@ class TestIndex(TorchBaseTest):
         self.run_compare_torch(
             shape,
             IndexModel(),
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             rand_range=(0, 2),
@@ -9063,14 +9658,15 @@ class TestBroadcastTensors(TorchBaseTest):
 
 class TestEmbedding(TorchBaseTest):
     @pytest.mark.parametrize(
-        "compute_unit, backend, input_dtype",
+        "compute_unit, backend, frontend, input_dtype",
         itertools.product(
             compute_units,
             backends,
+            frontends,
             [np.int32, np.float32],
         ),
     )
-    def test_embedding(self, compute_unit, backend, input_dtype):
+    def test_embedding(self, compute_unit, backend, frontend, input_dtype):
         num_embeddings = 4
         embedding_size = 10
         B = 2
@@ -9097,6 +9693,7 @@ class TestEmbedding(TorchBaseTest):
             model,
             expected_results=expected_results,
             input_as_shape=False,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             converter_input_type=converter_input_type,
@@ -10436,6 +11033,7 @@ class TestTupleIndex(TorchBaseTest):
                                input_as_shape=False, use_scripting=True,
                                backend=backend, compute_unit=compute_unit)
 
+
 class TestScaledDotProductAttention(TorchBaseTest):
     """
     Tests for torch.nn.functional.scaled_dot_product_attention op
@@ -10443,15 +11041,72 @@ class TestScaledDotProductAttention(TorchBaseTest):
     """
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, rank",
+        "compute_unit, backend, frontend, minimum_deployment_target",
         itertools.product(
             compute_units,
             backends,
+            frontends,
+            [None, ct.target.iOS18],
+        ),
+    )
+    def test_different_batch_dims(self, compute_unit, backend, frontend, minimum_deployment_target):
+        """
+        The query/key/value inputs can have different batch_dims.
+        """
+        q_shape = [1, 2, 10, 3]
+        k_shape = [2, 1, 10, 3]
+        v_shape = [2, 2, 10, 3]
+        input_shape = [
+            q_shape,
+            k_shape,
+            v_shape,
+        ]
+
+        model = ModuleWrapper(
+            function=nn.functional.scaled_dot_product_attention,
+            kwargs={
+                "attn_mask": None,
+                "dropout_p": 0.0,
+                "is_causal": False,
+            },
+        )
+
+        res = self.run_compare_torch(
+            input_shape,
+            model,
+            frontend=frontend,
+            backend=backend,
+            compute_unit=compute_unit,
+            minimum_deployment_target=minimum_deployment_target,
+        )
+
+        # Only iOS 18 with torch script can have mb.sdpa, because
+        # 1. mb.sdpa is introduced in iOS 18, so before iOS 18 we would decompose sdpa
+        # 2. torch.sdpa is not a core aten op, so EXIR would decompose sdpa
+        if minimum_deployment_target == ct.target.iOS18 and frontend == TorchFrontend.TORCHSCRIPT:
+            if backend == ("mlprogram", "fp16"):
+                assert get_op_types_in_program(res[1]._mil_program) == [
+                    "cast",
+                    "tile",
+                    "cast",
+                    "tile",
+                    "cast",
+                    "scaled_dot_product_attention",
+                ]
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend, frontend, minimum_deployment_target, rank, dynamic",
+        itertools.product(
+            compute_units,
+            backends,
+            frontends,
+            [None, ct.target.iOS18],
             [2, 3, 4, 5],
+            [True, False],
         ),
     )
     def test_different_input_ranks_no_mask(
-        self, compute_unit, backend, rank, minimum_deployment_target=None
+        self, compute_unit, backend, frontend, minimum_deployment_target, rank, dynamic
     ):
         """
         The query/key/value inputs can be any rank 2 or greater.
@@ -10477,26 +11132,94 @@ class TestScaledDotProductAttention(TorchBaseTest):
             },
         )
 
-        return self.run_compare_torch(
+        if dynamic:
+            converter_input_type = [
+                ct.TensorType(
+                    shape=(ct.RangeDim(upper_bound=10, default=batch_size),) + input_shape[1:]
+                )
+                for _ in range(3)
+            ]
+        else:
+            converter_input_type = None
+
+        _, coreml_model, _, _, _, _ = self.run_compare_torch(
             [input_shape] * 3,
             model,
+            frontend=frontend,
             backend=backend,
+            converter_input_type=converter_input_type,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
-        )[1]
+        )
+
+        # Only iOS 18 with torch script can have mb.sdpa, because
+        # 1. mb.sdpa is introduced in iOS 18, so before iOS 18 we would decompose sdpa
+        # 2. torch.sdpa is not a core aten op, so EXIR would decompose sdpa
+        if minimum_deployment_target == ct.target.iOS18 and frontend == TorchFrontend.TORCHSCRIPT:
+            if backend == ("mlprogram", "fp16"):
+                if rank == 2:
+                    if dynamic:
+                        expected_ops = [
+                            "expand_dims",
+                            "expand_dims",
+                            "expand_dims",
+                            "scaled_dot_product_attention",
+                            "squeeze",
+                        ]
+                    else:
+                        expected_ops = [
+                            "cast",
+                            "expand_dims",
+                            "cast",
+                            "expand_dims",
+                            "cast",
+                            "expand_dims",
+                            "scaled_dot_product_attention",
+                            "squeeze",
+                        ]
+                    assert get_op_types_in_program(coreml_model._mil_program) == expected_ops
+
+                else:
+                    if dynamic:
+                        expected_ops = [
+                            "scaled_dot_product_attention",
+                        ]
+                    else:
+                        expected_ops = [
+                            "cast",
+                            "cast",
+                            "cast",
+                            "scaled_dot_product_attention",
+                        ]
+                    assert get_op_types_in_program(coreml_model._mil_program) == expected_ops
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, seq_lengths, include_heads",
+        "compute_unit, backend, frontend, minimum_deployment_target, seq_lengths, include_heads, dynamic",
         itertools.product(
             compute_units,
             backends,
+            frontends,
+            [None, ct.target.iOS18],
             [(5, 5), (5, 7), (6, 4)],
             [False, True],
+            [True, False],
         ),
     )
     def test_is_causal_flag(
-        self, compute_unit, backend, seq_lengths, include_heads, minimum_deployment_target=None
+        self,
+        compute_unit,
+        backend,
+        frontend,
+        minimum_deployment_target,
+        seq_lengths,
+        include_heads,
+        dynamic,
     ):
+        if frontend == TorchFrontend.EXIR:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2199: placeholder assertion error"
+            )
+
         source_seq_len, target_seq_len = seq_lengths
         query_shape = (2, 2, target_seq_len, 7) if include_heads else (2, target_seq_len, 7)
         key_shape = (2, 2, source_seq_len, 7) if include_heads else (2, source_seq_len, 7)
@@ -10509,10 +11232,23 @@ class TestScaledDotProductAttention(TorchBaseTest):
                 "is_causal": True,
             },
         )
+
+        if dynamic:
+            converter_input_type = [
+                ct.TensorType(
+                    shape=(ct.RangeDim(upper_bound=10, default=input_shape[0]),) + input_shape[1:]
+                )
+                for input_shape in [query_shape, key_shape, value_shape]
+            ]
+        else:
+            converter_input_type = None
+
         res = self.run_compare_torch(
             [query_shape, key_shape, value_shape],
             model,
+            frontend=frontend,
             backend=backend,
+            converter_input_type=converter_input_type,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
         )
@@ -10523,21 +11259,32 @@ class TestScaledDotProductAttention(TorchBaseTest):
         assert len(mil_prog.find_ops(op_type="band_part")) == 0
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, seq_lengths, bool_mask",
+        "compute_unit, backend, frontend, minimum_deployment_target, seq_lengths, bool_mask, dynamic",
         itertools.product(
             compute_units,
             backends,
+            frontends,
+            [None, ct.target.iOS18],
             [(5, 5), (7, 5)],
+            [False, True],
             [False, True],
         ),
     )
     def test_attn_mask(
-        self, compute_unit, backend, seq_lengths, bool_mask, minimum_deployment_target=None
+        self,
+        compute_unit,
+        backend,
+        frontend,
+        minimum_deployment_target,
+        seq_lengths,
+        bool_mask,
+        dynamic,
     ):
-        if bool_mask:
+        if frontend == TorchFrontend.TORCHSCRIPT and bool_mask:
             pytest.xfail(
                 "rdar://110499660 ([CI][Bug] test_attn_mask is occasionally failing when bool_mask = True)"
             )
+
         source_seq_len, target_seq_len = seq_lengths
         query_shape = (2, 3, target_seq_len, 7)
         key_shape = (2, 3, source_seq_len, 7)
@@ -10554,26 +11301,54 @@ class TestScaledDotProductAttention(TorchBaseTest):
             mask = generate_input_data(mask_shape)
 
         model = ModuleWrapper(function=nn.functional.scaled_dot_product_attention)
+
+        if dynamic:
+            converter_input_type = [
+                ct.TensorType(
+                    shape=(ct.RangeDim(upper_bound=10, default=input_data.shape[0]),)
+                    + input_data.shape[1:]
+                )
+                for input_data in [query, key, value, mask]
+            ]
+        else:
+            converter_input_type = None
+
         self.run_compare_torch(
             (query, key, value, mask),
             model,
+            frontend=frontend,
             backend=backend,
+            converter_input_type=converter_input_type,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
             input_as_shape=False,
         )
 
     @pytest.mark.parametrize(
-        "compute_unit, backend, mask_as_input",
+        "compute_unit, backend, frontend, minimum_deployment_target, mask_as_input, dynamic",
         itertools.product(
             compute_units,
             backends,
+            frontends,
+            [None, ct.target.iOS18],
+            [True, False],
             [True, False],
         ),
     )
     def test_toy_xformer_with_sdpa(
-        self, compute_unit, backend, mask_as_input, minimum_deployment_target=None
+        self,
+        compute_unit,
+        backend,
+        frontend,
+        minimum_deployment_target,
+        mask_as_input,
+        dynamic,
     ):
+        if frontend == TorchFrontend.EXIR and not mask_as_input:
+            pytest.xfail(
+                "https://github.com/apple/coremltools/issues/2199: placeholder assertion error"
+            )
+
         embedding_size = 32
         seq_length = 16
         n_heads = 4
@@ -10656,11 +11431,27 @@ class TestScaledDotProductAttention(TorchBaseTest):
                 return x
 
         model = ToyTransformer()
-        self.run_compare_torch(
+
+        input_shapes = (
             [(batch_size, seq_length, embedding_size), (seq_length, seq_length)]
             if mask_as_input
-            else [(batch_size, seq_length, embedding_size)],
+            else [(batch_size, seq_length, embedding_size)]
+        )
+        if dynamic:
+            converter_input_type = [
+                ct.TensorType(
+                    shape=(ct.RangeDim(upper_bound=16, default=input_shape[0]),) + input_shape[1:]
+                )
+                for input_shape in input_shapes
+            ]
+        else:
+            converter_input_type = None
+
+        self.run_compare_torch(
+            input_shapes,
             model,
+            converter_input_type=converter_input_type,
+            frontend=frontend,
             backend=backend,
             compute_unit=compute_unit,
             minimum_deployment_target=minimum_deployment_target,
@@ -10689,7 +11480,10 @@ class TestScaledDotProductAttention(TorchBaseTest):
 
         with pytest.raises(
             ValueError,
-            match=r"scaled_dot_product_attention op: dropout is not supported yet",
+            match=(
+                r"A non-zero dropout probability is specified. Since Core ML "
+                r"does not support dropout yet, we cannot convert it"
+            ),
         ):
             model = ModuleWrapper(
                 function=nn.functional.scaled_dot_product_attention,
@@ -10754,7 +11548,7 @@ class TestMultinomial(TorchBaseTest):
 
         # As sampling is random, we make one element significantly larger than others to make
         # outputs consistent.
-        input_data = torch.tensor([0, 1e5, 0, 0, 1, 1, 1], dtype=torch.float)
+        input_data = torch.tensor([0, 5e4, 0, 0, 1, 1, 1], dtype=torch.float)
         self.run_compare_torch(
             input_data,
             TestModel(),
@@ -10762,6 +11556,42 @@ class TestMultinomial(TorchBaseTest):
             compute_unit=compute_unit,
             input_as_shape=False,
         )
+
+    @pytest.mark.parametrize(
+        "compute_unit, backend",
+        itertools.product(compute_units, backends),
+    )
+    def test_multinomial_probs_instead_of_logits(self, compute_unit, backend):
+        """
+        Verify the input to multinomial is probs instead of logits.
+
+        When the number of drawing is large, the drawing results could tell us if the input is probs
+        or logits. In this test we use only 2 classes, so we can compare the number of `1` in results
+        to verify if the input is taken a logarithm or not.
+        """
+
+        class TestModel(nn.Module):
+            def forward(self, x):
+                return torch.multinomial(x, 1000, replacement=True)
+
+        input_data = torch.tensor([0.01, 0.1], dtype=torch.float)
+        torch_model = TestModel()
+        torch_model.eval()
+        traced_model = torch.jit.trace(torch_model, input_data)
+        mlmodel = ct.convert(
+            traced_model,
+            inputs=[ct.TensorType(name="input", shape=input_data.shape, dtype=np.float16)],
+            outputs=[ct.TensorType(name="output", dtype=np.float16)],
+            convert_to="mlprogram",
+            compute_units=ct.ComputeUnit.CPU_ONLY,
+            minimum_deployment_target=ct.target.iOS16,
+        )
+
+        if ct.utils._is_macos():
+            mlmodel_out = mlmodel.predict({"input": input_data.numpy()})["output"]
+            torch_out = torch_model(input_data).numpy()
+            # The counting of 1 in PyTorch and CoreML output should be similar.
+            assert np.abs(np.sum(mlmodel_out) - np.sum(torch_out)) / mlmodel_out.size < 0.05
 
     @pytest.mark.parametrize(
         "compute_unit, backend",

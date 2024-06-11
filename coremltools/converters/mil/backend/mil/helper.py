@@ -10,7 +10,18 @@ from coremltools import proto
 from coremltools.converters.mil.mil import types
 
 # For immediate values, those types are stored in bytes (MIL parser reads those types from bytes).
-IMMEDIATE_VALUE_TYPES_IN_BYTES = (types.fp16, types.int8, types.uint8, types.uint32)
+IMMEDIATE_VALUE_TYPES_IN_BYTES = (
+    types.fp16,
+    types.int4,
+    types.int8,
+    types.uint1,
+    types.uint2,
+    types.uint3,
+    types.uint4,
+    types.uint6,
+    types.uint8,
+    types.uint32,
+)
 
 
 def create_valuetype_scalar(data_type):
@@ -41,16 +52,6 @@ def create_valuetype_list(length, elem_shape, dtype):
     v_type = proto.MIL_pb2.ValueType()
     update_listtype(v_type.listType, length, elem_shape, dtype)
     return v_type
-
-def create_valuetype_dict(key_type, value_type):
-    """
-    Return proto.MIL_pb2.ValueType with dict (dictionaryType) set
-    """
-    v_type = proto.MIL_pb2.ValueType()
-    v_type.dictionaryType.keyType.CopyFrom(types_to_proto(key_type))
-    v_type.dictionaryType.valueType.CopyFrom(types_to_proto(value_type))
-    return v_type
-
 
 def create_valuetype_tensor(shape, data_type):
     """
@@ -262,41 +263,20 @@ def types_to_proto_primitive(valuetype):
     return types.BUILTIN_TO_PROTO_TYPES[valuetype]
 
 
-def types_to_proto(valuetype):
-    if types.is_tensor(valuetype):
-        primitive = types_to_proto_primitive(valuetype.get_primitive())
-        return create_valuetype_tensor(valuetype.get_shape(), primitive)
-    elif types.is_tuple(valuetype):
-        v_type = proto.MIL_pb2.ValueType()
-        t_type = v_type.tupleType
-        for t in valuetype.T:
-            new_v_type = t_type.types.add()
-            new_v_type.CopyFrom(types_to_proto(t))
-        return v_type
-    elif types.is_list(valuetype):
-        elem = valuetype.T[0]
-        length = valuetype.T[1]
-        if types.is_tensor(elem):
-            dtype = types_to_proto_primitive(elem.get_primitive())
-            elem_shape = elem.get_shape()
-        elif types.is_scalar(elem):
-            dtype = types_to_proto_primitive(valuetype)
-            elem_shape = ()
-        elif types.is_str(elem):
-            dtype = types_to_proto_primitive(elem)
-            elem_shape = ()
-        else:
-            raise NotImplementedError("Only list of either tensors or scalars supported. "
-                                      "Got element of type {}".format(elem.__type_info__()))
-        return create_valuetype_list(length=length, elem_shape=elem_shape, dtype=dtype)
-    elif types.is_dict(valuetype):
-        return create_valuetype_dict(valuetype.T[0], valuetype.T[1])
-    else:
-        return create_valuetype_scalar(types_to_proto_primitive(valuetype))
-
-
 def _get_offset_by_writing_data(output_var, blob_writer):
-    if output_var.val.dtype.kind == 'f' and output_var.val.dtype.itemsize == 4:
+    if output_var.dtype == types.int4:
+        offset = blob_writer.write_int4_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.dtype == types.uint1:
+        offset = blob_writer.write_uint1_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.dtype == types.uint2:
+        offset = blob_writer.write_uint2_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.dtype == types.uint3:
+        offset = blob_writer.write_uint3_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.dtype == types.uint4:
+        offset = blob_writer.write_uint4_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.dtype == types.uint6:
+        offset = blob_writer.write_uint6_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.val.dtype.kind == "f" and output_var.val.dtype.itemsize == 4:
         offset = blob_writer.write_float_data(np.ascontiguousarray(output_var.val.flatten()))
     elif output_var.val.dtype.kind == "f" and output_var.val.dtype.itemsize == 2:
         output_var_fp16_to_bytes_to_uint16 = np.frombuffer(
@@ -313,6 +293,10 @@ def _get_offset_by_writing_data(output_var, blob_writer):
         offset = blob_writer.write_uint16_data(np.ascontiguousarray(output_var.val.flatten()))
     elif output_var.val.dtype.kind == "i" and output_var.val.dtype.itemsize == 2:
         offset = blob_writer.write_int16_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.val.dtype.kind == "i" and output_var.val.dtype.itemsize == 4:
+        offset = blob_writer.write_int32_data(np.ascontiguousarray(output_var.val.flatten()))
+    elif output_var.val.dtype.kind == "u" and output_var.val.dtype.itemsize == 4:
+        offset = blob_writer.write_uint32_data(np.ascontiguousarray(output_var.val.flatten()))
     else:
         raise TypeError("Unsupported type, {}, for net buffer serialization.".format(output_var.val.dtype))
 

@@ -7,7 +7,7 @@ import itertools
 import math as math
 from typing import List, Optional, Union
 
-import numpy as _np
+import numpy as np
 
 from coremltools.converters.mil._deployment_compatibility import AvailableTarget as target
 from coremltools.converters.mil.input_types import InputType
@@ -41,7 +41,9 @@ def value_at(x: Var, idx: int, name=None, before_op=None):
     return mb.slice_by_index(**args)
 
 
-def _construct_gather_op(op_type: str, x: Var, indices: Var, axis: Var = None, **kwarg) -> Var:
+def _construct_gather_op(
+    op_type: str, x: Var, indices: Var, axis: Var = None, name: str = None
+) -> Var:
     """
     This utility is a more general gather in the sense that:
     1. Both mb.gather and mb.gather_nd are handled
@@ -50,24 +52,33 @@ def _construct_gather_op(op_type: str, x: Var, indices: Var, axis: Var = None, *
     assert (
         op_type in {"gather", "gather_nd"}
     ), f"This utility only handles gather or gather_nd, but got {op_type}"
-    assert (
-        (op_type == "gather_nd") != (axis is not None)
-    ), "mb.gather_nd should not have input axis"
+    if op_type == "gather_nd":
+        assert axis is None, "mb.gather_nd should not have input axis"
 
-    if x.dtype == types.bool:
-        # cast bool input to a smallest supported dtype to gather, then cast back gather result
-        work_dtype = "int8" if is_current_opset_version_compatible_with(target.iOS17) else "fp16"
-        working_x = mb.cast(x=x, dtype=work_dtype)
-        if op_type == "gather":
-            gathered_x = mb.gather(x=working_x, indices=indices, axis=axis)
-        else:
-            gathered_x = mb.gather_nd(x=working_x, indices=indices)
-        result = mb.cast(x=gathered_x, dtype="bool", **kwarg)
+    # if is gathering bool:
+    #     cast bool input to a smallest supported dtype to gather, then cast back gather result
+    #     the back cast carries the specified name
+    # else:
+    #     usual gather, and gather carries the specified name
+    is_gathering_bool = x.dtype == types.bool
+    if is_gathering_bool:
+        gather_name_kwarg = {}
+        cast_name_kwarg = {} if name is None else {"name": name}
     else:
-        if op_type == "gather":
-            result = mb.gather(x=x, indices=indices, axis=axis, **kwarg)
-        else:
-            result = mb.gather_nd(x=x, indices=indices, **kwarg)
+        gather_name_kwarg = {} if name is None else {"name": name}
+
+    if is_gathering_bool:
+        work_dtype = "int8" if is_current_opset_version_compatible_with(target.iOS17) else "fp16"
+        x = mb.cast(x=x, dtype=work_dtype)
+
+    if op_type == "gather":
+        result = mb.gather(x=x, indices=indices, axis=axis, **gather_name_kwarg)
+    else:
+        result = mb.gather_nd(x=x, indices=indices, **gather_name_kwarg)
+
+    if is_gathering_bool:
+        result = mb.cast(x=result, dtype="bool", **cast_name_kwarg)
+
     return result
 
 
@@ -501,7 +512,9 @@ def solve_binary_generic_einsum(parsed_vectors, a_var, b_var, name) -> Var:
         return ab
 
 
-def _lower_scaled_dot_product_attention(q: Var, k: Var, v: Var, mask: Var, name: str) -> Var:
+def _decompose_scaled_dot_product_attention(
+    q: Var, k: Var, v: Var, mask: Var, name: str, before_op: Optional[Operation] = None
+) -> Var:
     # scale the query input
     embed_size = q.shape[-1]
     if is_symbolic(embed_size):
@@ -509,70 +522,119 @@ def _lower_scaled_dot_product_attention(q: Var, k: Var, v: Var, mask: Var, name:
             "The embedding size, i.e. last dimension of the shape of query tensor"
             " cannot be symbolic, in scaled_dot_product_attention op"
         )
+
+    q, k, v = promote_input_dtypes([q, k, v])
     multiplicative_scale_factor = 1 / math.sqrt(embed_size)
-    q, k, v, multiplicative_scale_factor = promote_input_dtypes(
-        [q, k, v, multiplicative_scale_factor]
-    )
-    q = mb.mul(x=q, y=multiplicative_scale_factor)
+    if types.builtin_to_string(q.dtype) == "fp16":
+        multiplicative_scale_factor = np.float16(multiplicative_scale_factor)
+    q = mb.mul(x=q, y=multiplicative_scale_factor, before_op=before_op)
 
     # multiply query and key input tensors
     # shape of output: (target_seq, source_seq) or (B,...,target_seq, source_seq)
-    attn_weights = mb.matmul(x=q, y=k, transpose_y=True)
+    attn_weights = mb.matmul(x=q, y=k, transpose_y=True, before_op=before_op)
 
     # add mask if applicable
     if mask is not None:
-        attn_weights = mb.add(x=attn_weights, y=mask)
+        attn_weights = mb.add(x=attn_weights, y=mask, before_op=before_op)
 
     # do softmax
-    attn_weights_normalized = mb.softmax(x=attn_weights, axis=-1)
+    attn_weights_normalized = mb.softmax(x=attn_weights, axis=-1, before_op=before_op)
 
     # multiply attn_weights and value tensor
-    res = mb.matmul(x=attn_weights_normalized, y=v, name=name)
+    res = mb.matmul(x=attn_weights_normalized, y=v, name=name, before_op=before_op)
     return res
 
 
-def _construct_constexpr_affine_op(
-    quantized_weights: _np.ndarray,
-    zero_point: Optional[Union[Var, _np.ndarray, _np.generic]],
-    scale: Union[Var, _np.ndarray, _np.generic],
+def _construct_constexpr_dequant_op(
+    quantized_weights: np.ndarray,
+    zero_point: Optional[Union[Var, np.ndarray, np.generic]],
+    scale: Union[Var, np.ndarray, np.generic],
     axis: Optional[Union[Var, int]] = None,
     name: Optional[str] = None,
     before_op: Optional[Operation] = None,
-) -> Operation:
-    """Constructs the constexpr op to represent the dequantized weight from PyTorch's data."""
-    # The constexpr_affine_dequantize op requires axis.
-    if axis is None:
-        # Infer the axis based on scale's shape.
-        non_single_dim = [dim for dim, dim_size in enumerate(scale.shape) if dim_size > 1]
-        if len(non_single_dim) > 2:
-            raise ValueError(
-                "The constexpr_affine_dequantize op doesn't support scale which "
-                "have more than one non-single dimensions. Got scale with shape "
-                f"{scale.shape}"
+) -> Var:
+    """
+    Constructs the constexpr op to represent the quantized weight.
+
+    Use constexpr_affine_dequantize for pre-iOS18 and constexpr_blockwise_shift_scale for others.
+    """
+    if not is_current_opset_version_compatible_with(target.iOS18):
+        # The constexpr_affine_dequantize op requires axis.
+        if axis is None:
+            # Infer the axis based on scale's shape.
+            non_single_dim = [dim for dim, dim_size in enumerate(scale.shape) if dim_size > 1]
+            if len(non_single_dim) > 2:
+                raise ValueError(
+                    "The constexpr_affine_dequantize op doesn't support scale which "
+                    "have more than one non-single dimensions. Got scale with shape "
+                    f"{scale.shape}"
+                )
+            # Empty non_single_dim means per-tensor quantization, just use a dummy axis.
+            axis = 0 if len(non_single_dim) == 0 else non_single_dim[0]
+        if isinstance(axis, int):
+            axis = np.int32(axis)
+
+        # The constexpr_affine_dequantize op requires zero_point.
+        if zero_point is None:
+            zero_point = np.zeros_like(scale).astype(quantized_weights.dtype)
+
+        # The constexpr_affine_dequantize op requires scale and zero_point to have rank 0 or 1.
+        if isinstance(scale, (np.ndarray, np.generic)):
+            scale = np.squeeze(scale)
+        if isinstance(zero_point, (np.ndarray, np.generic)):
+            zero_point = np.squeeze(zero_point)
+
+        kwargs = {
+            "quantized_data": quantized_weights,
+            "zero_point": zero_point,
+            "scale": scale,
+            "axis": axis,
+        }
+        if name is not None:
+            kwargs["name"] = name
+        if before_op is not None:
+            kwargs["before_op"] = before_op
+        return mb.constexpr_affine_dequantize(**kwargs)
+
+    # For iOS18 constexpr_blockwise_shift_scale op, the data/scale/offset need to have same rank.
+    if len(quantized_weights.shape) != len(scale.shape):
+        if axis is not None:
+            target_shape = [1] * len(quantized_weights.shape)
+            target_shape[axis] = quantized_weights.shape[axis]
+        else:
+            target_shape = list(scale.shape) + [1] * (
+                len(quantized_weights.shape) - len(scale.shape)
             )
-        # If non_single_dim is empty, it means it's per-tensor quantization, just use a dummy axis.
-        axis = 0 if len(non_single_dim) == 0 else non_single_dim[0]
-    if isinstance(axis, int):
-        axis = _np.int32(axis)
+        if np.prod(scale.shape) != np.prod(target_shape):
+            raise ValueError(
+                "Unable to infer scale's shape. Please provide a scale that has the "
+                "same rank as the weight."
+            )
+        scale = scale.reshape(target_shape)
 
-    # The constexpr_affine_dequantize op requires zero_point.
-    if zero_point is None:
-        zero_point = _np.zeros_like(scale).astype(quantized_weights.dtype)
-
-    # The constexpr_affine_dequantize op requires scale and zero_point to have rank 0 or 1.
-    if isinstance(scale, (_np.ndarray, _np.generic)):
-        scale = _np.squeeze(scale)
-    if isinstance(zero_point, (_np.ndarray, _np.generic)):
-        zero_point = _np.squeeze(zero_point)
+    # Check the value range to determine the true data type (such as int4/uint4).
+    sub_byte_type = (
+        types.uint4
+        if types.numpy_type_to_builtin_type(quantized_weights.dtype).is_unsigned()
+        else types.int4
+    )
+    sub_byte_range = types.type_mapping._TYPES_TO_RANGE[sub_byte_type]
+    if (
+        np.max(quantized_weights) <= sub_byte_range.high
+        and np.min(quantized_weights) >= sub_byte_range.low
+    ):
+        quantized_weights = quantized_weights.astype(types.nptype_from_builtin(sub_byte_type))
 
     kwargs = {
-        "quantized_data": quantized_weights,
-        "zero_point": zero_point,
+        "data": quantized_weights,
         "scale": scale,
-        "axis": axis,
     }
+    if zero_point is not None and np.any(zero_point):
+        # Only pass the offset parameter when not all elements in `zero_point` are zeroes.
+        zero_point = zero_point.reshape(scale.shape).astype(quantized_weights.dtype)
+        kwargs["offset"] = zero_point
     if name is not None:
         kwargs["name"] = name
     if before_op is not None:
         kwargs["before_op"] = before_op
-    return mb.constexpr_affine_dequantize(**kwargs)
+    return mb.constexpr_blockwise_shift_scale(**kwargs)

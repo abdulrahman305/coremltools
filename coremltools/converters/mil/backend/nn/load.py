@@ -12,11 +12,11 @@ from coremltools.converters.mil.input_types import (
     ImageType,
     RangeDim,
     Shape,
+    TensorType,
 )
 from coremltools.converters.mil.mil import types
 from coremltools.converters.mil.mil.types.symbolic import any_symbolic, any_variadic, is_symbolic
-from coremltools.models import MLModel
-from coremltools.models import neural_network as neural_network
+from coremltools.models import model, neural_network
 from coremltools.models.datatypes import Array
 from coremltools.models.neural_network import flexible_shape_utils
 from coremltools.models.neural_network.flexible_shape_utils import (
@@ -30,7 +30,7 @@ from .op_mapping import convert_ops
 
 
 def _convert_to_image_input(proto, inputs, skip_model_load=False):
-    tmp_model = MLModel(proto, skip_model_load=skip_model_load)
+    tmp_model = model.MLModel(proto, skip_model_load=skip_model_load)
     for input_type in inputs:
         if isinstance(input_type, ImageType):
             if input_type.color_layout in (ColorLayout.GRAYSCALE, ColorLayout.GRAYSCALE_FLOAT16):
@@ -57,7 +57,7 @@ def _convert_to_image_input(proto, inputs, skip_model_load=False):
 
 
 def _convert_to_classifier(proto, classifier_config, skip_model_load=False):
-    tmp_model = MLModel(proto, skip_model_load=skip_model_load)
+    tmp_model = model.MLModel(proto, skip_model_load=skip_model_load)
     tmp_model = neural_network.utils.make_nn_classifier(
         tmp_model,
         classifier_config.class_labels,
@@ -169,7 +169,7 @@ def _set_optional_inputs(proto, input_types):
     # Set default values for optional input_types
     default_map = {}
     for input_type in input_types:
-        if isinstance(input_type, ImageType):
+        if not isinstance(input_type, TensorType):
             continue
         if input_type.default_value is not None:
             default_map[input_type.name] = input_type.default_value

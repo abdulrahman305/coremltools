@@ -18,6 +18,7 @@ from tqdm import tqdm as _tqdm
 from coremltools import _logger as logger
 from coremltools.converters.mil._deployment_compatibility import AvailableTarget as target
 from coremltools.converters.mil.frontend import _utils
+from coremltools.converters.mil.frontend.milproto.load import TranscriptionContext
 from coremltools.converters.mil.mil import Builder as mb
 from coremltools.converters.mil.mil import Symbol, types
 from coremltools.converters.mil.mil.block import is_current_opset_version_compatible_with
@@ -33,6 +34,7 @@ from coremltools.converters.mil.mil.types.type_mapping import builtin_to_string
 from coremltools.converters.mil.mil.var import ListVar, Var
 
 from .._utils import build_einsum_mil, value_at
+from .internal_graph import InternalTorchIRGraph
 from .torch_op_registry import _TORCH_OPS_REGISTRY, register_torch_op
 from .utils import (
     NUM_TO_DTYPE_STRING,
@@ -42,6 +44,7 @@ from .utils import (
     TORCH_DTYPE_TO_NUM,
     TYPE_TO_DTYPE_STRING,
     TorchFrontend,
+    dtype_to_32bit,
 )
 
 # The pytorch args for many of the below ops were sourced from
@@ -67,7 +70,11 @@ def _all_outputs_present(context, graph):
     return True
 
 
-def convert_nodes(context, graph):
+def convert_nodes(
+    context: TranscriptionContext,
+    graph: InternalTorchIRGraph,
+    early_exit: Optional[bool] = True,
+) -> None:
     """
     Iterate over the nodes of a graph or block and convert to MIL.
 
@@ -85,7 +92,7 @@ def convert_nodes(context, graph):
             logger.error(f"\n\nERROR - converting '{node.kind}' op (located at: '{op_location}'):\n")
             raise e     # re-raise exception
 
-        if _all_outputs_present(context, graph):
+        if early_exit and _all_outputs_present(context, graph):
             # We've generated all the outputs the graph needs, terminate conversion.
             break
 
@@ -123,7 +130,10 @@ def convert_single_node(context, node):
             ScopeInfo(source=ScopeSource.TORCHSCRIPT_MODULE_NAME, data=scope_name),
         ]
     elif context.frontend == TorchFrontend.EXIR:
-        scopes = [ScopeInfo(source=ScopeSource.EXIR_DEBUG_HANDLE, data=[node.meta["debug_handle"]])]
+        scopes = [
+            ScopeInfo(source=ScopeSource.EXIR_STACK_TRACE, data=[node.meta.get("stack_trace")]),
+            ScopeInfo(source=ScopeSource.EXIR_DEBUG_HANDLE, data=[node.meta.get("debug_handle")]),
+        ]
     else:
         raise ValueError(f"Invalid PyTorch frontend {context.frontend}")
 
@@ -544,20 +554,28 @@ def norm(context, node):
 
 
 def _vector_norm(x, order, dim, keep_dims, name):
+    # 0 norm is special
     if order.val == 0:
         # sum(x!=0)
         x = mb.cast(x=x, dtype="fp32")
         temp = mb.not_equal(x=x, y=0.)
         temp = mb.cast(x=temp, dtype='int32')
         temp = mb.reduce_sum(x=temp, axes=dim, keep_dims=keep_dims, name=name)
+    # infinity norm is special
     elif order.val > VALUE_CLOSE_TO_INFINITY:
         # max(abs(x))
         temp = mb.abs(x=x)
         temp = mb.reduce_max(x=temp, axes=dim, keep_dims=keep_dims, name=name)
+    # -infinity norm is special
     elif order.val < -VALUE_CLOSE_TO_INFINITY:
         # min(abs(x))
         temp = mb.abs(x=x)
         temp = mb.reduce_min(x=temp, axes=dim, keep_dims=keep_dims, name=name)
+    # Although 2 norm can fit in the general formula,
+    # since it is very common, we have tailored kernel for it
+    elif order.val == 2:
+        temp = mb.reduce_l2_norm(x=x, axes=dim, keep_dims=keep_dims, name=name)
+    # use general formula to compute all other norms
     else:
         # sum(abs(x)^{order})^{(1 / order)}
         temp = mb.abs(x=x)
@@ -566,6 +584,7 @@ def _vector_norm(x, order, dim, keep_dims, name):
         temp = mb.reduce_sum(x=temp, axes=dim, keep_dims=keep_dims)
         temp = mb.pow(x=temp, y=1.0 / order.val, name=name)
     return temp
+
 
 @register_torch_op
 def _weight_norm(context, node):
@@ -591,7 +610,6 @@ def _weight_norm(context, node):
     direction = mb.mul(x=v, y=inverse_norm)
     result = mb.mul(x=g, y=direction, name=node.name)
     context.add(result)
-
 
 
 def _matrix_norm(x, order, dim, keep_dims, name):
@@ -809,7 +827,7 @@ def gt(context, node):
     context.add(greater)
 
 
-@register_torch_op(torch_alias=["t", "numpy_t"])
+@register_torch_op(torch_alias=["t", "numpy_t", "transpose.int"])
 def transpose(context, node):
     assert len(node.outputs) == 1
     inputs = _get_inputs(context, node)
@@ -1464,9 +1482,11 @@ def minimum(context, node):
 
 @register_torch_op
 def clamp_min(context, node):
-    x = _get_inputs(context, node, expected=2)
-    x = mb.clip(x=x[0], alpha=x[1], beta=_np.inf, name=node.name)
-    context.add(x)
+    inputs = _get_inputs(context, node, expected=2)
+    x, y = inputs[0], inputs[1]
+    assert x.dtype == y.dtype
+    out = mb.maximum(x=x, y=y, name=node.name)
+    context.add(out)
 
 
 @register_torch_op
@@ -1621,7 +1641,7 @@ def mean(context, node):
     context.add(res)
 
 
-@register_torch_op(torch_alias=["squeeze_copy.dim", "squeeze_copy.dims"])
+@register_torch_op(torch_alias=["squeeze.dim", "squeeze_copy.dim", "squeeze_copy.dims"])
 def squeeze(context, node):
     inputs = _get_inputs(context, node)
     if len(inputs) == 1:
@@ -1675,6 +1695,14 @@ def view(context, node):
     inputs = _get_inputs(context, node, expected=2)
     x = inputs[0]
     shape = inputs[1]
+
+    if isinstance(shape, Var) and np.prod(shape.shape) == 0:
+        # Reshape to empty shape (works only for scalar) is a no op
+        assert (
+            np.prod(x.shape) <= 1
+        ), "Reshape to empty shape works only for scalar and single-element tensor"
+        context.add(mb.identity(x=x, name=node.name))
+        return
 
     if isinstance(shape, ListVar):
         length = mb.list_length(ls=shape)
@@ -3501,7 +3529,7 @@ def _if(context, node):
         context.add(output_var, torch_name=output_name)
 
 
-@register_torch_op(torch_alias=["select_copy.int"])
+@register_torch_op(torch_alias=["select.int", "select_copy.int"])
 def select(context, node):
     inputs = _get_inputs(context, node, expected=3)
     _input = inputs[0]
@@ -3555,9 +3583,6 @@ def select(context, node):
 def getitem(context, node):
     inputs = _get_inputs(context, node, expected=2)
 
-    if not isinstance(inputs[0], (list, tuple)):
-        raise AssertionError("Item selection is supported only on python list/tuple objects")
-
     if inputs[1].val is None:
         raise AssertionError("Only static item selection supported")
 
@@ -3567,6 +3592,15 @@ def getitem(context, node):
         raise AssertionError(
             f"Index into python list/tuple needs to be integer. Provided value: {inputs[1].val}"
         )
+
+    if not isinstance(inputs[0], (list, tuple)):
+        # For single object with index 0, return this object
+        if index == 0:
+            context.add(inputs[0], torch_name=node.name)
+            return
+        # Otherwise undefined
+        else:
+            raise AssertionError("Item selection is supported only on python list/tuple objects")
 
     out = inputs[0][index]
 
@@ -3680,17 +3714,73 @@ def _translate_torch_tensor_assign(
     squeeze_mask,
     name,
 ):
-    return mb.torch_tensor_assign(
-        x=x,
-        updates=updates,
-        begin=begin,
-        end=end,
-        stride=stride,
-        begin_mask=begin_mask,
-        end_mask=end_mask,
-        squeeze_mask=squeeze_mask,
-        name=name,
-    )
+
+    def torch_tensor_assign_implementation() -> Var:
+        return mb.torch_tensor_assign(
+            x=x,
+            updates=updates,
+            begin=begin,
+            end=end,
+            stride=stride,
+            begin_mask=begin_mask,
+            end_mask=end_mask,
+            squeeze_mask=squeeze_mask,
+            name=name,
+        )
+
+    if is_current_opset_version_compatible_with(target.iOS18):
+        # slice_update is not supporting scalar update at runtime.
+        # Until this radar is fixed: rdar://128221986 ([Feature][Slice_update] The backend is not supporting scalar update for the slice_update op),
+        # we have a workaround to expand scalar update to a 1-D tensor.
+        if updates.rank == 0:
+            # Since the workaround uses the compile-time value of begin and end,
+            # so we do the validation first.
+            is_begin_or_end_dynamic = False
+            for var in [begin, end]:
+                if isinstance(var, Var) and var.val is None:
+                    is_begin_or_end_dynamic = True
+            if is_begin_or_end_dynamic or any_symbolic(x.shape):
+                return torch_tensor_assign_implementation()
+
+            # First pick up the ``dim`` in which ``squeeze_mask[dim] = True``,
+            # and do the following transformation:
+            # 1. set ``squeeze_mask[dim] = False``
+            # 2. set both ``begin_mask`` and ``end_mask`` to ``False``
+            # 3. make ``end = begin + 1``
+            dim = None
+            for i, val in enumerate(squeeze_mask):
+                if val is True:
+                    dim = i
+                    break
+            squeeze_mask[dim] = False
+            begin_mask = [False] * x.rank
+            end_mask = [False] * x.rank
+
+            if isinstance(begin, Var):
+                begin = begin.val
+            if isinstance(end, Var):
+                end = end.val
+
+            # convert negative indexes to positive indexes
+            begin = [val if val >= 0 else val + x.shape[i] for i, val in enumerate(begin)]
+            end = mb.add(x=begin, y=1)
+
+            # expand updates to 1D tensor
+            updates = mb.expand_dims(x=updates, axes=[0])
+
+        return mb.slice_update(
+            x=x,
+            update=updates,
+            begin=begin,
+            end=end,
+            stride=stride,
+            begin_mask=begin_mask,
+            end_mask=end_mask,
+            squeeze_mask=squeeze_mask,
+            name=name,
+        )
+
+    return torch_tensor_assign_implementation()
 
 
 @register_torch_op
@@ -3759,18 +3849,171 @@ def _internal_op_tensor_inplace_fill(context, node):
 
 
 @register_torch_op
-def index_put(context, node):
+def select_scatter(context, node):
     inputs = _get_inputs(context, node, expected=4)
+    x = inputs[0]
+    updates = inputs[1]
+    dim = inputs[2].val
+    if dim is None:
+        raise ValueError("Only compile time known dim supported yet")
+    index = inputs[3]
+
+    # mb.torch_tensor_assign handles multi-dim slicing
+    # so we need to create slice specifications for all other dimensions
+    begin = [0] * x.rank
+    begin[dim] = index
+    begin = mb.concat(values=begin, axis=0)
+    end = x.shape
+    # and squeeze dim to do pure indexing on it
+    squeeze_mask = [False] * x.rank
+    squeeze_mask[dim] = True
+
+    updated_x = _translate_torch_tensor_assign(
+        x=x,
+        updates=updates,
+        begin=begin,
+        end=end,
+        stride=None,
+        begin_mask=None,
+        end_mask=None,
+        squeeze_mask=squeeze_mask,
+        name=node.name,
+    )
+    context.add(updated_x)
+
+
+@register_torch_op
+def slice_scatter(context, node):
+    inputs = _get_inputs(context, node, min_expected=2)
+    x, updates = promote_input_dtypes(inputs[0:2])
+
+    # sanitize and validate dim
+    dim = 0 if len(inputs) <= 2 else inputs[2].val
+    if dim is None:
+        raise ValueError("Only compile time known dim supported yet")
+    if dim < 0:
+        dim = dim + x.rank
+    assert 0 <= dim and dim < x.rank, f"invalid dim: {dim}"
+
+    # sanitize start
+    start = 0 if len(inputs) <= 3 else inputs[3]
+    if start is None:
+        start = 0
+
+    # sanitize end
+    if len(inputs) <= 4:
+        end = x.shape[dim]
+    else:
+        end = inputs[4]
+        if end is not None:
+            end = mb.minimum(x=inputs[4], y=x.shape[dim])
+        else:
+            end = x.shape[dim]
+
+    # get step given different number of inputs
+    step = 1 if len(inputs) <= 5 else inputs[5]
+
+    # mb.torch_tensor_assign handles multi-dim slicing
+    # so we need to pad start, end, step from scalar to x.rank
+    starts = [0] * x.rank
+    starts[dim] = start
+    starts = mb.concat(values=starts, axis=0)
+    ends = list(x.shape)
+    ends[dim] = end
+    ends = mb.concat(values=ends, axis=0)
+    steps = [1] * x.rank
+    steps[dim] = step
+    steps = mb.concat(values=steps, axis=0)
+
+    updated_x = _translate_torch_tensor_assign(
+        x=x,
+        updates=updates,
+        begin=starts,
+        end=ends,
+        stride=steps,
+        begin_mask=None,
+        end_mask=None,
+        squeeze_mask=None,
+        name=node.name,
+    )
+    context.add(updated_x)
+
+
+@register_torch_op
+def index_put(context, node):
+    inputs = _get_inputs(context, node, min_expected=3)
     x = inputs[0]
     indices = inputs[1]
     values = inputs[2]
-    accumulate = inputs[3].val
-    rank = x.rank
+    accumulate = False if len(inputs) < 4 else inputs[3].val
     mode = "add" if accumulate else "update"
 
-    indices_type = indices[0].sym_type.get_primitive()
+    assert isinstance(indices, list), "indices must be a list of tensors"
+    # Usually indices is a list of non-None tensors, so we stack them and feed to mb.scatter_nd
+    # However, when there exists a whole slice (i.e. :), that index is represented as None
+    if any(map(lambda index: index is None, indices)):
+        # We have 2 ways to translate such torch.index_put, both have pros and cons
+        # 1. mb.scatter_nd
+        #    * pro: can handle accumulate or update
+        #    * con: can only have whole slice at last dimensions
+        # 2. mb.torch_tensor_assign
+        #    * pro: can have whole slice at arbitrary dimension
+        #    * con: can only handle update
+        # Here we use mb.torch_tensor_assign
+        # TODO: explore how can we cover as many torch.index_put cases as possible
+        if accumulate:
+            raise NotImplementedError(
+                "If there existed any whole slice (e.g. : in x[:, 0]), "
+                "only torch.index_put(..., accumulate=False) handled yet"
+            )
 
+        begin = [0] * x.rank
+        end = list(x.shape)
+        stride = [1] * x.rank
+        begin_mask = [True] * x.rank
+        end_mask = [True] * x.rank
+        # note: in torch slice, an indexed dim becomes size 1, rather than squeezed, e.g.
+        #     x = torch.zeros((2, 3))
+        #     y = x[:, 1]
+        # we will get y.shape as (2, 1)
+        is_dim_unity = [False] * x.rank
+        for dim, index in enumerate(indices):
+            if index is not None:
+                if len(index.shape) > 0:
+                    index = mb.squeeze(x=index)
+                begin[dim] = index
+                end[dim] = mb.add(x=index, y=1)
+                begin_mask[dim] = False
+                end_mask[dim] = False
+                is_dim_unity[dim] = True
+        begin = mb.concat(values=begin, axis=0)
+        end = mb.concat(values=end, axis=0)
+
+        expected_values_shape = []
+        for dim in range(x.rank):
+            expected_values_shape.append(1 if is_dim_unity[dim] else x.shape[dim])
+        expected_values_shape = tuple(expected_values_shape)
+
+        if values.shape != expected_values_shape:
+            values = _broadcast(values.name + "_broadcasted", values, expected_values_shape)
+
+        updated_x = _translate_torch_tensor_assign(
+            x=x,
+            updates=values,
+            begin=begin,
+            end=end,
+            stride=stride,
+            begin_mask=begin_mask,
+            end_mask=end_mask,
+            squeeze_mask=[False] * x.rank,
+            name=node.name,
+        )
+        context.add(updated_x)
+        return
+
+    indices_type = indices[0].sym_type.get_primitive()
     if types.is_bool(indices_type):
+        # indices
         assert len(indices) == 1, "Unsupported index_put_ usage."
         indices = indices[0]
         assert (
@@ -3778,20 +4021,25 @@ def index_put(context, node):
         ), "indices shape must equal to input shape for index put operation."
         indices = mb.cast(x=indices, dtype="int32")
         indices = mb.non_zero(x=indices)
-
-    if types.is_int(indices_type):
+        # values
+        if values.shape == ():
+            values = mb.expand_dims(x=values, axes=[0])
+        if values.rank == 1 and values.shape[0] == 1:
+            reps = value_at(mb.shape(x=indices), 0)
+            reps = mb.expand_dims(x=reps, axes=[0])
+            values = mb.tile(x=values, reps=reps)
+    elif types.is_int(indices_type):
+        # indices
         if len(indices) > 1:
             indices = mb.stack(values=indices, axis=indices[0].rank)
         else:
             indices = mb.expand_dims(x=indices[0], axes=[-1])
-
-    if len(values.shape) == 0:
-        values = mb.expand_dims(x=values, axes=[0])
-
-    if values.rank == 1 and values.shape[0] == 1:
-        reps = value_at(mb.shape(x=indices), 0)
-        reps = mb.expand_dims(x=reps, axes=[0])
-        values = mb.tile(x=values, reps=reps)
+        # values
+        expected_values_shape = indices.shape[:-1] + x.shape[indices.shape[-1] :]
+        if values.shape != expected_values_shape:
+            values = _broadcast(values.name + "_broadcasted", values, expected_values_shape)
+    else:
+        raise ValueError(f"Only bool and int index handled yet, but got {indices_type}")
 
     if is_current_opset_version_compatible_with(target.iOS17):
         # IOS17 `scatter_nd` behaviour is undefined for negative indices.
@@ -4008,7 +4256,12 @@ def index(context, node):
 
 @register_torch_op
 def ones(context, node):
-    inputs = _get_inputs(context, node, expected=[5, 6])
+    inputs = _get_inputs(
+        context,
+        node,
+        expected={TorchFrontend.TORCHSCRIPT: [5, 6]},
+        min_expected={TorchFrontend.EXIR: 1}
+    )
     size = inputs[0]
     # dtype = NUM_TO_TORCH_DTYPE[inputs[1].val] unused
     # layout = inputs[2] unused
@@ -4054,11 +4307,16 @@ def full(context, node):
 
     size = inputs[0]
 
-    dtype = (
-        np.float32
-        if len(inputs) < 3 or inputs[2] is None
-        else NUM_TO_NUMPY_DTYPE[TORCH_DTYPE_TO_NUM[inputs[2].val]]
-    )
+    # dtype could be torch.dtype or an integer that maps to a numpy.dtype
+    dtype = None
+    if len(inputs) < 3 or inputs[2] is None:
+        dtype = np.float32
+    elif isinstance(inputs[2].val, torch.dtype):
+        dtype = NUM_TO_NUMPY_DTYPE[TORCH_DTYPE_TO_NUM[inputs[2].val]]
+    elif isinstance(inputs[2].val, (int, np.generic)):
+        dtype = NUM_TO_NUMPY_DTYPE[inputs[2].val]
+    else:
+        raise ValueError(f"unsupported type {type(inputs[2].val)}.")
 
     val = dtype(inputs[1].val)
 
@@ -4443,11 +4701,21 @@ def split(context, node):
     context.add(res, torch_name=node.name)
 
 
-@register_torch_op
+@register_torch_op(torch_alias=["unbind.int"])
 def unbind(context, node):
-    inputs = _get_inputs(context, node, expected=2)
+    inputs = _get_inputs(
+        context,
+        node,
+        expected={
+            TorchFrontend.TORCHSCRIPT: 2,
+            TorchFrontend.EXIR: [1, 2],
+        },
+    )
     x = inputs[0]
-    dim = inputs[1].val
+    if len(inputs) == 1:
+        dim = 0
+    else:
+        dim = inputs[1].val
     split_sizes = [1] * x.shape[dim]
     if len(split_sizes) == 1:
         res = [mb.squeeze(x=x, axes=[dim])]
@@ -4494,7 +4762,7 @@ def to(context, node):
         np_type = nptype_from_builtin(target_dtype.dtype)
         dtype = NUMPY_DTYPE_TO_TORCH_NUM[np_type]
 
-    torch_dtype = NUM_TO_TORCH_DTYPE[dtype]
+    torch_dtype = dtype_to_32bit(NUM_TO_TORCH_DTYPE[dtype])
     if isinstance(_input, Var) and _input.can_be_folded_to_const():
         # numpy -> torch -> torch cast -> numpy
         # This path is needed to use the mapping of passed in dtypes to torch dtypes.
@@ -4786,10 +5054,15 @@ def argmax(context, node):
 
 @register_torch_op(torch_alias=["empty_like"])
 def zeros_like(context, node):
-    inputs = _get_inputs(context, node, expected=6)
+    inputs = _get_inputs(
+        context,
+        node,
+        expected={TorchFrontend.TORCHSCRIPT: 6},
+        min_expected={TorchFrontend.EXIR: 1},
+    )
     x = inputs[0]
     shape = mb.shape(x=x)
-    if inputs[1] and inputs[1].val:
+    if len(inputs) > 1 and inputs[1] and inputs[1].val:
         dtype = inputs[1].val
         np_type = NUM_TO_NUMPY_DTYPE[dtype]
     else:
@@ -4832,7 +5105,7 @@ def zeros(context, node):
         # layout = inputs[2] unused
         # device = inputs[3] unused
         # pin_memory = inputs[4] unused
-        torch_dtype = NUM_TO_TORCH_DTYPE[dtype]
+        torch_dtype = dtype_to_32bit(NUM_TO_TORCH_DTYPE[dtype])
         zeros_array = torch.zeros(tuple(size)).type(torch_dtype).numpy()
         zeros = mb.const(val=zeros_array, name=node.name)
 
@@ -5023,6 +5296,47 @@ def repeat_interleave(context, node):
     """
     For now, we only support scalar repeats + None or 0 dim
     """
+
+    def repeat_interleave_dim0(x: Var, repeats_val: int, name: str = None) -> Var:
+        """
+        on a high level:
+             x
+             | tile in dim 0
+             v
+            [x, x, ...]
+             | reshape to split the repeats
+             v
+            [[x],
+             [x],
+             ...]
+             | transpose(1, 0)
+             V
+            [x^T, x^T, ...]
+             | flatten
+             V
+            result
+        """
+
+        reps = [1] * x.rank
+        reps[0] = repeats_val
+        x_tiled = mb.tile(x=x, reps=reps)
+
+        split_reps = [repeats_val] + list(x.shape)
+        x_reshaped = mb.reshape(x=x_tiled, shape=list(split_reps))
+
+        perm = [*range(x.rank + 1)]
+        perm[0] = 1
+        perm[1] = 0
+        x_transposed = mb.transpose(x=x_reshaped, perm=perm)
+
+        result_shape = list(x.shape)
+        result_shape[0] = -1
+        if name is None:
+            result = mb.reshape(x=x_transposed, shape=result_shape)
+        else:
+            result = mb.reshape(x=x_transposed, shape=result_shape, name=node.name)
+        return result
+
     x, repeats, dim, _ = _get_inputs(context, node, expected=4)
 
     repeats_val = repeats.val
@@ -5034,49 +5348,32 @@ def repeat_interleave(context, node):
             )
         repeats_val = repeats_val0
 
+    is_dim_0 = True
     # This would operate on the flattened input tensor
     if dim is None:
         x = mb.reshape(x=x, shape=(-1,))
     else:
+        # non-0 dim requires additional pre and post treatment
         if dim.val != 0:
-            raise NotImplementedError(
-                "Conversion for torch.repeat_interleave with non-zero dim has not been implemented"
-            )
+            is_dim_0 = False
 
-    """
-    on a high level:
-         x
-         | tile in dim 0
-         v
-        [x, x, ...]
-         | reshape to split the repeats
-         v
-        [[x],
-         [x],
-         ...]
-         | transpose(1, 0)
-         V
-        [x^T, x^T, ...]
-         | flatten
-         V
-        result
-    """
+    if is_dim_0:
+        result = repeat_interleave_dim0(x, repeats_val, node.name)
+    else:
+        # pre treatment: permute to have dim 0
+        perm2dim0 = [dim.val]
+        for i in range(x.rank):
+            if i != dim.val:
+                perm2dim0.append(i)
+        x = mb.transpose(x=x, perm=perm2dim0)
 
-    reps = [1] * x.rank
-    reps[0] = repeats_val
-    x_tiled = mb.tile(x=x, reps=reps)
+        result_of_dim0 = repeat_interleave_dim0(x, repeats_val)
 
-    split_reps = [repeats_val] + list(x.shape)
-    x_reshaped = mb.reshape(x=x_tiled, shape=list(split_reps))
-
-    perm = [*range(x.rank + 1)]
-    perm[0] = 1
-    perm[1] = 0
-    x_transposed = mb.transpose(x=x_reshaped, perm=perm)
-
-    result_shape = list(x.shape)
-    result_shape[0] = -1
-    result = mb.reshape(x=x_transposed, shape=result_shape, name=node.name)
+        # post treatment: permute back to original dim
+        perm_back = [0] * x.rank
+        for i in range(x.rank):
+            perm_back[perm2dim0[i]] = i
+        result = mb.transpose(x=result_of_dim0, perm=perm_back, name=node.name)
 
     context.add(result)
 
@@ -5196,7 +5493,7 @@ def ceil(context, node):
     context.add(mb.ceil(x=inputs[0], name=node.name))
 
 
-@register_torch_op
+@register_torch_op(torch_alias=["clip"])
 def clamp(context, node):
     inputs = _get_inputs(context, node, expected=[1,2,3])
     x = inputs[0]
@@ -5225,7 +5522,10 @@ def triu(context, node):
     inputs = _get_inputs(context, node, expected=2)
     x = inputs[0]
     diagonal = inputs[1]
-    diagonal = 0 if diagonal is None else diagonal.val
+    if diagonal is not None and diagonal.val is not None:
+        diagonal = diagonal.val
+    else:
+        diagonal = 0
     if diagonal <= 0:
         res = mb.band_part(x=x, lower=-diagonal, upper=-1, name=node.name)
     else:
@@ -5239,7 +5539,10 @@ def tril(context, node):
     inputs = _get_inputs(context, node, expected=2)
     x = inputs[0]
     diagonal = inputs[1]
-    diagonal = 0 if diagonal is None else diagonal.val
+    if diagonal is not None and diagonal.val is not None:
+        diagonal = diagonal.val
+    else:
+        diagonal = 0
     if diagonal >= 0:
         res = mb.band_part(x=x, lower=-1, upper=diagonal, name=node.name)
     else:
@@ -5598,7 +5901,20 @@ def std(context, node):
 @register_torch_op
 def copy(context, node):
     inputs = _get_inputs(context, node, expected=[2, 3])
-    context.add(mb.identity(x=inputs[0], name=node.name))
+    assert (
+        context.frontend != TorchFrontend.TORCHSCRIPT
+    ), (
+        "In torch script frontend, by graph pass `generate_tensor_assignment_ops`, "
+        "`torch.copy_` should have been replaced with `_internal_op_tensor_inplace_copy`"
+    )
+    if context.frontend == TorchFrontend.EXIR:
+        src = inputs[1]
+        if inputs[0].shape != src.shape:
+            _, src = _broadcast_tensors(inputs[: 2])
+        result = mb.identity(x=src, name=node.name)
+    else:
+        raise ValueError(f"Invalid PyTorch frontend {context.frontend}")
+    context.add(result)
 
 
 @register_torch_op
@@ -5845,22 +6161,21 @@ def replication_pad2d(context, node):
     pad = _np.pad(pad_flipped, (len(x.shape) * 2 - len(pad_flipped), 0))
     context.add(mb.pad(x=x, pad=pad, mode='replicate'), node.name)
 
+def _solve_broadcast_shape(shapes: List[List[int]]) -> List[np.ndarray]:
+    rank = _np.max([len(shape) for shape in shapes])
+    shapes = [[1] * (rank - len(shape)) + shape for shape in shapes]
+    result_shape = []
+    for i in range(rank):
+        dims = [shapes[j][i] for j in range(len(shapes))]
+        if any_symbolic(dims):
+            # rdar://85559497 (Handle dynamic shapes inputs broadcast for pytorch)
+            raise NotImplementedError(
+                "Only static shaped inputs are supported for torch.broadcast_tensors conversion."
+            )
+        result_shape.append(_np.max(dims))
+    return result_shape
 
 def _broadcast_tensors(tensors):
-    def _solve_broadcast_shape(shapes):
-        rank = _np.max([len(shape) for shape in shapes])
-        shapes = [[1] * (rank - len(shape)) + shape for shape in shapes]
-        result_shape = []
-        for i in range(rank):
-            dims = [shapes[j][i] for j in range(len(tensors))]
-            if any_symbolic(dims):
-                # rdar://85559497 (Handle dynamic shapes inputs broadcast for pytorch)
-                raise NotImplementedError(
-                    "Only static shaped inputs are supported for torch.broadcast_tensors conversion."
-                )
-            result_shape.append(_np.max(dims))
-        return result_shape
-
     if len(tensors) == 1:
         return tensors
 
@@ -6530,23 +6845,17 @@ def _get_causal_attn_mask(is_causal: bool, query_var: Var, key_var: Var) -> Var:
 
 def _cast_bool_attn_mask(attn_mask: Var, query_var: Var) -> Var:
     """
-    compute float mask as:
-    mask = cast(bool_mask) + (1-cast(bool_mask)) * -30k*ones(shape(bool_mask))
+    compute float mask as (1 - cast(bool_mask)) * -30k
     """
     assert is_bool(attn_mask.dtype)
 
-    shape = mb.shape(x=attn_mask)
-    negative_inf = mb.fill(
-        shape=shape, value=_np.array([-3e4]).astype(types.nptype_from_builtin(query_var.dtype))
-    )
     mask = mb.cast(x=attn_mask, dtype=types.builtin_to_string(query_var.dtype))
     compliment_of_mask = mb.sub(
         x=_np.array([1.0]).astype(types.nptype_from_builtin(mask.dtype)), y=mask
     )
-    compliment_of_mask = mb.mul(x=negative_inf, y=compliment_of_mask)
-    return mb.add(x=mask, y=compliment_of_mask)
+    return mb.mul(x=-3e4, y=compliment_of_mask)
 
-@register_torch_op
+@register_torch_op(torch_alias=["_scaled_dot_product_flash_attention_for_cpu"])
 def scaled_dot_product_attention(context, node):
     """
     Input shapes/types:
@@ -6567,6 +6876,14 @@ def scaled_dot_product_attention(context, node):
     See details at:
     https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
     """
+
+    def _get_batch_dims(x: Var) -> List[int]:
+        return list(x.shape)[:-2]
+
+    def _broadcast_tensor_to_same_batch_dims(x: Var, batch_dims: List[int]) -> Var:
+        broadcast_shape = batch_dims + list(x.shape[-2:])
+        return _broadcast(x.name + "_broadcast_same_batch_dims", x, broadcast_shape)
+
     inputs = _get_inputs(context, node, min_expected=3)
     q, k, v = inputs[:3]
     attn_mask = None if len(inputs) < 4 else inputs[3]
@@ -6584,8 +6901,20 @@ def scaled_dot_product_attention(context, node):
             "scaled_dot_product_attention op: attn_mask cannot be provided when is_causal is set to True."
         )
 
-    if dropout is not None and (dropout.val is None or dropout.val != 0.0):
-        raise ValueError("scaled_dot_product_attention op: dropout is not supported yet")
+    if dropout is not None:
+        if isinstance(dropout, Var):
+            if dropout.val is None:
+                raise NotImplementedError(
+                    "A variable dropout probability is specified. Since Core ML "
+                    "does not support dropout yet, we cowardly refuse to convert it"
+                )
+            else:
+                dropout = dropout.val
+        if dropout != 0.0:
+            raise ValueError(
+                "A non-zero dropout probability is specified. Since Core ML "
+                "does not support dropout yet, we cannot convert it"
+            )
 
     # check that ranks of q, k, v and attn_mask match
     if k.rank != q.rank:
@@ -6601,12 +6930,46 @@ def scaled_dot_product_attention(context, node):
     if is_causal:
         mask = _get_causal_attn_mask(is_causal, q, k)
     elif attn_mask is not None:
-        if is_bool(attn_mask.dtype):
+        # For ios18-, bool attention mask has to be cast to equivalent floating point attention mask
+        if is_bool(attn_mask.dtype) and not is_current_opset_version_compatible_with(target.iOS18):
             mask = _cast_bool_attn_mask(attn_mask, q)
         else:
             mask = attn_mask
 
-    res = _utils._lower_scaled_dot_product_attention(q, k, v, mask, node.name)
+    # Since ios18, Core ML supports scaled_dot_product_attention op
+    if is_current_opset_version_compatible_with(target.iOS18):
+        # ios18 scaled_dot_product_attention only supports rank >= 3
+        is_rank_2 = q.rank == 2
+
+        if is_rank_2:
+            q = mb.expand_dims(x=q, axes=[0])
+            k = mb.expand_dims(x=k, axes=[0])
+            v = mb.expand_dims(x=v, axes=[0])
+
+        # broadcast the batch_dims to the same shape
+        # note that, we only support the broadcast if the batch_dim is static
+        q_batch = _get_batch_dims(q)
+        k_batch = _get_batch_dims(k)
+        v_batch = _get_batch_dims(v)
+
+        if not any_symbolic(q_batch + k_batch + v_batch):
+            b_dims = _solve_broadcast_shape([q_batch, k_batch, v_batch])
+            q = _broadcast_tensor_to_same_batch_dims(q, b_dims)
+            k = _broadcast_tensor_to_same_batch_dims(k, b_dims)
+            v = _broadcast_tensor_to_same_batch_dims(v, b_dims)
+
+        # directly translated into iOS18 sdpa op
+        res = mb.scaled_dot_product_attention(
+            query=q, key=k, value=v, attn_mask=mask, name=node.name
+        )
+
+        if is_rank_2:
+            res = mb.squeeze(x=res, axes=[0], name=node.name)
+
+    # For ios18-, scaled_dot_product_attention has to be decomposed
+    else:
+        res = _utils._decompose_scaled_dot_product_attention(q, k, v, mask, node.name)
+
     context.add(res)
 
 
@@ -6633,5 +6996,6 @@ def multinomial(context, node):
         raise ValueError("In torch.multinomial op, num_samples must be const")
     if num_samples > 1 and not replacement:
         raise ValueError("When num_samples is larger than 1, only replacement=True is supported.")
-    x = mb.random_categorical(x=x, size=num_samples, name=node.name)
+    # Based on PyTorch documentations, the input to `torch.multinomial` is probability, not logit.
+    x = mb.random_categorical(x=x, size=num_samples, mode="probs", name=node.name)
     context.add(x)

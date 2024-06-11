@@ -9,11 +9,11 @@ import os
 import platform
 import shutil
 import tempfile
-from distutils.version import StrictVersion
 from typing import Optional
 
 import numpy as np
 import pytest
+from packaging.version import Version
 
 import coremltools as ct
 from coremltools import RangeDim, TensorType
@@ -2324,7 +2324,7 @@ class TestElementWiseUnary(TensorFlowBaseTest):
         if compute_unit != ct.ComputeUnit.CPU_ONLY and mode in self._FP16_UNSUPPORTED:
             return
 
-        if _get_version(tf.__version__) == StrictVersion(PREBUILT_TF1_WHEEL_VERSION):
+        if _get_version(tf.__version__) == Version(PREBUILT_TF1_WHEEL_VERSION):
             if mode in _PREBUILD_WHEEL_SEGFAULTING_MODE:
                 # we should re-enable these tests after this radar rdar://100735561 ([CI] Build a more stable TF1 Rosetta wheel for the lightning CI) is fixed
                 pytest.skip("Prebuilt wheel segfaulting on several functions.")
@@ -5616,12 +5616,6 @@ class TestTopK(TensorFlowBaseTest):
             pytest.skip("iOS16 version topk needed for sort = False")
         if not sort and _macos_version() < (13, 0):
             pytest.skip("New functionality in macOS13/iOS16")
-        if rank == 5 and k is None and sort and (
-            backend[0] == "neuralnetwork" or (
-                platform.machine() == "x86_64" and _macos_version() < (15, 0)
-            )
-        ):
-            pytest.xfail("rdar://120891130: TopK failing randomly")
 
         # TensorFlow only supports last dimension (axis = -1).
         shape = np.random.randint(low=3, high=4, size=rank)
